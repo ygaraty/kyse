@@ -168,14 +168,14 @@ kernel void swiglu(device float       *out  [[buffer(0)]],
 
 struct AttnParams { int n_heads, n_kv_heads, head_dim, rot_dim, pos, seq_len; float eps, rope_theta; };
 
-// RMSNorm + RoPE of every query head (in place) and key head (into the cache),
-// plus the value copy. threadgroup g < n_heads is query head g, the rest are
+// RMSNorm + RoPE of every query head (in place) and key head (into the f16
+// cache), plus the value copy. threadgroup g < n_heads is query head g, the rest are
 // kv heads. one thread per dimension.
 kernel void attn_prep(device float          *q       [[buffer(0)]],
                       device const float    *k       [[buffer(1)]],
                       device const float    *v       [[buffer(2)]],
-                      device float          *k_cache [[buffer(3)]],
-                      device float          *v_cache [[buffer(4)]],
+                      device half           *k_cache [[buffer(3)]],
+                      device half           *v_cache [[buffer(4)]],
                       device const float    *q_norm  [[buffer(6)]],
                       device const float    *k_norm  [[buffer(7)]],
                       constant AttnParams   &p       [[buffer(9)]],
@@ -185,16 +185,17 @@ kernel void attn_prep(device float          *q       [[buffer(0)]],
     threadgroup float tmp[32], xs[1024];
     int hd = p.head_dim, kv_dim = p.n_kv_heads * hd;
     device const float *src, *w;
-    device float *dst;
+    device float *q_dst = nullptr;
+    device half *k_dst = nullptr;
     if ((int)g < p.n_heads) {
-        src = dst = q + g * 2 * hd;
+        src = q_dst = q + g * 2 * hd;
         w = q_norm;
     } else {
         int h = g - p.n_heads;
         src = k + h * hd;
-        dst = k_cache + (ulong)p.pos * kv_dim + h * hd;
+        k_dst = k_cache + (ulong)p.pos * kv_dim + h * hd;
         w = k_norm;
-        v_cache[(ulong)p.pos * kv_dim + h * hd + i] = v[h * hd + i];
+        v_cache[(ulong)p.pos * kv_dim + h * hd + i] = half(v[h * hd + i]);
     }
     float x = src[i];
     x *= rsqrt(tg_sum(x * x, tmp, i, ntg) / hd + p.eps) * w[i];
@@ -209,13 +210,14 @@ kernel void attn_prep(device float          *q       [[buffer(0)]],
         float c = precise::cos(f), s = precise::sin(f);
         x = (int)i < hr ? xs[i] * c - xs[i + hr] * s : xs[i] * c + xs[j] * s;
     }
-    dst[i] = x;
+    if (q_dst) q_dst[i] = x;
+    else k_dst[i] = half(x);
 }
 
 // one threadgroup per query head: scores, softmax, weighted sum of values, output gate
 kernel void attn_decode(device float        *q       [[buffer(0)]],
-                        device const float  *k_cache [[buffer(3)]],
-                        device const float  *v_cache [[buffer(4)]],
+                        device const half   *k_cache [[buffer(3)]],
+                        device const half   *v_cache [[buffer(4)]],
                         device float        *att     [[buffer(5)]],
                         device float        *out     [[buffer(8)]],
                         constant AttnParams &p       [[buffer(9)]],
@@ -232,9 +234,9 @@ kernel void attn_decode(device float        *q       [[buffer(0)]],
 
     float scale = rsqrt((float)hd), mx = -INFINITY;
     for (int t = tid; t < n; t += ntg) {
-        device const float *kt = k_cache + (ulong)t * kv_dim + kv_off;
+        device const half *kt = k_cache + (ulong)t * kv_dim + kv_off;
         float dot = 0.0f;
-        for (int i = 0; i < hd; i++) dot += qs[i] * kt[i];
+        for (int i = 0; i < hd; i++) dot += qs[i] * float(kt[i]);
         a[t] = dot * scale;
         mx = max(mx, a[t]);
     }
@@ -249,7 +251,7 @@ kernel void attn_decode(device float        *q       [[buffer(0)]],
 
     for (int i = tid; i < hd; i += ntg) {
         float acc = 0.0f;
-        for (int t = 0; t < n; t++) acc += a[t] * v_cache[(ulong)t * kv_dim + kv_off + i];
+        for (int t = 0; t < n; t++) acc += a[t] * float(v_cache[(ulong)t * kv_dim + kv_off + i]);
         out[h * hd + i] = acc / sum * sigmoid(gate[i]);
     }
 }

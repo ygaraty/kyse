@@ -77,12 +77,14 @@ void ref_swiglu(float *out, const float *gate, const float *up, int n) {
 
 void ref_attention(const AttnArgs *a) {
     int hd = a->head_dim, kv_dim = a->n_kv_heads * hd;
-    float *kc = a->k_cache + (size_t)a->pos * kv_dim, *vc = a->v_cache + (size_t)a->pos * kv_dim;
+    _Float16 *kc = a->k_cache + (size_t)a->pos * kv_dim, *vc = a->v_cache + (size_t)a->pos * kv_dim;
+    float kh[hd];
     for (int h = 0; h < a->n_kv_heads; h++) {
-        ref_rmsnorm(kc + h * hd, a->k + h * hd, a->k_norm, hd, a->eps);
-        rope(kc + h * hd, a->pos, a->rot_dim, a->rope_theta);
+        ref_rmsnorm(kh, a->k + h * hd, a->k_norm, hd, a->eps);
+        rope(kh, a->pos, a->rot_dim, a->rope_theta);
+        for (int i = 0; i < hd; i++) kc[h * hd + i] = kh[i];
     }
-    memcpy(vc, a->v, kv_dim * sizeof(float));
+    for (int i = 0; i < kv_dim; i++) vc[i] = a->v[i];
 
     float scale = 1.0f / sqrtf((float)hd);
     for (int h = 0; h < a->n_heads; h++) {
@@ -92,7 +94,7 @@ void ref_attention(const AttnArgs *a) {
         int kvh = h / (a->n_heads / a->n_kv_heads);
         float *att = a->att + (size_t)h * a->seq_len;
         for (int t = 0; t <= a->pos; t++) {
-            const float *k = a->k_cache + (size_t)t * kv_dim + kvh * hd;
+            const _Float16 *k = a->k_cache + (size_t)t * kv_dim + kvh * hd;
             float dot = 0.0f;
             for (int i = 0; i < hd; i++) dot += q[i] * k[i];
             att[t] = dot * scale;
@@ -101,7 +103,7 @@ void ref_attention(const AttnArgs *a) {
         float *o = a->out + h * hd;
         memset(o, 0, hd * sizeof(float));
         for (int t = 0; t <= a->pos; t++) {
-            const float *v = a->v_cache + (size_t)t * kv_dim + kvh * hd;
+            const _Float16 *v = a->v_cache + (size_t)t * kv_dim + kvh * hd;
             for (int i = 0; i < hd; i++) o[i] += att[t] * v[i];
         }
         for (int i = 0; i < hd; i++) o[i] *= sigmoidf(gate[i]);

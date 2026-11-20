@@ -20,7 +20,12 @@ Qwen3.5-0.8B on Apple M1 (the 9B measurements use an M5):
 original (bf16)    1,506 MB    33 ms/token      1.061       57.6%      45.0%
 english int8         588 MB    14 ms/token      1.077       61.2%      46.2%
 english int4         339 MB    12 ms/token      1.139       57.2%      37.5%
+english int4 mixed   408 MB   ~13 ms/token      1.077       59.2%      41.2%
 ```
+
+The last row is int4 with AWQ and three matrix types kept at int8 (see
+[Better int4](#better-int4-awq-mixed-precision-low-rank)): int8's bits per byte
+at 69% of its size.
 
 ## Quick start
 
@@ -73,19 +78,22 @@ Both embedding and output-head rows are pruned with exactly the same token map.
 `--embed-quant` controls both tables. The shrinker memory-maps its source;
 conversion and quantization still need working memory for individual matrices.
 Allow roughly 18 GB for the exported BF16 text weights plus runtime state;
-pruning and quantization reduce that. The FP32 KV cache costs 64 KiB per context
+pruning and quantization reduce that. The f16 KV cache costs 32 KiB per context
 token and DeltaNet recurrent state about 48 MiB. Accelerate expands BF16 weights
 to FP32 and therefore needs substantially more memory. Metal uses page-aligned
 views of the weight file to avoid a single checkpoint-sized GPU buffer; each
 individual matrix must fit the device's buffer limit.
 
 New exports use format v3, adding an untied-head flag and, when needed, an
-output matrix after the final norm. The C loader continues to accept v1/v2
-models. Earlier executables cannot read v3 exports.
+output matrix after the final norm. `shrink.py` writes v4, which adds a format
+per matrix (for mixed precision) and optional low-rank corrections. The C loader
+continues to accept v1–v3 models. Earlier executables cannot read newer files.
 
 `make test` exercises synthetic sharded tied/untied checkpoints through export,
-vocabulary pruning, BF16/Q8/Q4, C CPU inference, reset, snapshot/restore, and v2
-loading (Python + numpy + a C23 compiler). On macOS, run
+vocabulary pruning, BF16/Q8/Q4, mixed precision with AWQ and low-rank
+corrections, C CPU inference, reset, snapshot/restore, and v2 loading (Python +
+numpy + a C23 compiler). It also checks that AWQ's rescaling leaves a layer's
+output unchanged. On macOS, run
 `KYSE_TEST_METAL=1 make test` to compare Metal with the CPU reference as well.
 Vision and MTP remain excluded.
 
@@ -180,14 +188,19 @@ Apple M1 (16 GB), Metal backend. To reproduce, run `scripts/data.py` (above), th
 | | original | english bf16 | **english int8** | english int4 |
 |---|---|---|---|---|
 | file size | 1,506 MB | 1,104 MB | **588 MB** | 339 MB |
-| memory in use (4K context) | ~1.65 GB | ~1.24 GB | **~0.72 GB** | ~0.47 GB |
+| memory in use (4K context) | ~1.60 GB | ~1.19 GB | **~0.67 GB** | ~0.42 GB |
 | generation speed | 30 tok/s | 42 tok/s | **70 tok/s** | 87 tok/s |
 | WikiText-2 bits/byte ↓ | 1.0611 | 1.0766 | **1.0771** | 1.1393 |
 | WikiText-2 top-1 next token | 40.6% | 40.3% | **40.3%** | 38.6% |
 | ARC-Easy acc (250 questions, ±3.1) | 57.6% | 61.2% | **61.2%** | 57.2% |
-| ARC-Easy acc_norm | 50.4% | 54.0% | **53.6%** | 52.8% |
+| ARC-Easy acc_norm | 50.4% | 54.0% | **54.0%** | 52.8% |
 | HellaSwag acc (80 items, ±5.5) | 37.5% | 36.2% | **36.2%** | 33.8% |
 | HellaSwag acc_norm | 45.0% | 45.0% | **46.2%** | 37.5% |
+
+Memory is the weights plus the state for a 4K context (71 MB, of which the
+f16 KV cache is 50 MB). The quality rows were measured with an f32 KV cache,
+except int8's, which was re-measured after the switch to f16: identical, apart
+from one ARC-Easy question (acc_norm 53.6% → 54.0%).
 
 How to read this:
 
@@ -197,8 +210,7 @@ How to read this:
   getting smarter: with fewer competing tokens, the answer choices get scored a
   little differently.
 - **Plain int4 rounding hurts.** It loses 5.8% bits/byte and 7.5 points of
-  HellaSwag acc_norm. Keeping the sensitive matrices at int8, or rotating /
-  activation-aware scaling (AWQ), are the usual fixes.
+  HellaSwag acc_norm. The next section fixes most of that.
 - **Bits per byte is the sensitive measure.** Unlike perplexity, it doesn't depend
   on the vocabulary. The multiple-choice samples are small and only catch large
   changes.
@@ -207,6 +219,64 @@ How to read this:
 lm-evaluation-harness does. `acc` uses the total log-likelihood; `acc_norm`
 divides it by the choice's length in bytes. The context runs once and each
 choice branches from a snapshot of the recurrent state (`model_snapshot`).
+
+## Better int4: AWQ, mixed precision, low-rank
+
+Ideas from the LLM-deployment lectures of MIT's EfficientML course, tried on
+0.8B. Every variant below has the English vocabulary and an int8 embedding.
+
+```
+./bench calib model.bin data/english.txt data/calib.bin -k 32 -l 1024   # activation statistics
+python3 scripts/shrink.py model.bin tokenizer.bin data/counts.txt en-q4-mixed \
+    --quant q4 --awq data/calib.bin --q8 '*.wo,*.w_out,*.w_down'
+```
+
+- **AWQ** (`--awq`): `bench calib` records the mean |x| of every input channel of
+  every matrix over 9K tokens of English. `shrink.py` scales each matrix's input
+  channels by s = mean|x|^α before quantizing and folds 1/s into whatever
+  produced the input: the RMSNorm weights, or the rows of `w_up` for `w_down`.
+  α is picked per matrix group by a quick estimate of the output error. The
+  file format and kernels don't change.
+- **Mixed precision** (`--q8 PATTERNS`): chosen matrices stay int8, e.g.
+  `'*.w_down'` (every layer) or `'0.*'` (all of layer 0).
+- **Low-rank correction** (`--lowrank PATTERNS --rank 16`, SVDQuant): the 16
+  largest directions of a matrix are kept in bf16 and only the rest is
+  quantized. `model.c` applies the correction with two small extra matvecs.
+
+Apple M1, Metal. Speed is the best of 7 runs on a busy machine (int8 ran at
+70 tok/s on a quiet one), so compare within the column only.
+
+| int4 variant | size | bits/byte ↓ | int4 gap closed | top-1 | ARC acc / norm | HellaSwag acc / norm | tok/s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| english int8 (reference) | 588 MB | 1.0771 | | 40.3% | 61.2 / 54.0 | 36.2 / 46.2 | 63 |
+| plain | 339 MB | 1.1393 | 0% | 38.6% | 57.2 / 52.8 | 33.8 / 37.5 | 79 |
+| AWQ | 339 MB | 1.1176 | 35% | 38.6% | 58.4 / 53.2 | 35.0 / 41.2 | 76 |
+| AWQ + rank 16 on `wo`, `w_out` | 341 MB | 1.1081 | 50% | 39.4% | | | 75 |
+| AWQ + int8 `wo`, `w_out` | 364 MB | 1.0892 | 81% | 40.0% | 58.0 / 55.2 | 35.0 / 40.0 | 76 |
+| **AWQ + int8 `wo`, `w_out`, `w_down`** | **408 MB** | **1.0773** | **~100%** | **40.6%** | **59.2 / 55.2** | **35.0 / 41.2** | **72** |
+
+What we learned:
+
+- **The out projections are the weak spot.** `wo` and `w_out` read gated inputs,
+  so AWQ can't fold a scale into them. Their int4 error (activation-weighted) is
+  twice that of every other matrix: a few input channels of `w_out` have 50 to
+  100 times the median magnitude. Keeping just these 50M weights at
+  int8 (+25 MB) closes 81% of the gap; adding `w_down` closes all of it.
+- **AWQ helps, but less than in the paper.** Most of this model's activations
+  have no large outliers, so rescaling cuts each matrix's error by about 10%.
+  How the error is weighted matters: weighting by mean x², which those few
+  huge channels dominate, closed only 14% of the gap; mean |x|² closed 35%.
+- **Low-rank corrections don't pay off here.** On `wo`/`w_out` they recover a
+  third as much as int8 for a tenth of the bytes (+2 MB). On every matrix they
+  cost 20 MB and do *worse* than on those two alone (1.1118), and the extra
+  matvecs slow decoding (19.6 vs 15.1 ms/token in the bits-per-byte runs).
+- **The multiple-choice samples are too small to rank these variants.** Every
+  int4 variant is within the error bars of the others. The HellaSwag gap to
+  int8 (41 vs 46) is under one standard error.
+- **The KV cache is now f16** (all backends). This halves it to 24 KB → 12 KB
+  per token, with the same bits per byte at 4K and 16K-byte contexts.
+
+Raw output: [results/0.8b/int4-experiments.txt](results/0.8b/int4-experiments.txt).
 
 ## Qwen3.5-0.8B in one screen
 
@@ -226,8 +296,8 @@ token ─► embed (248,320 × 1024, tied with the LM head)
   A short causal conv (k = 4) runs before it and a gated RMSNorm after it. Its
   state is a fixed 18 MB, however long the context.
 - **Gated attention** uses 8 query heads × 256 dims and 2 KV heads, q/k RMSNorm,
-  RoPE on a quarter of each head (θ = 10⁷), and a sigmoid output gate. Its KV
-  cache costs 24 KB per token.
+  RoPE on a quarter of each head (θ = 10⁷), and a sigmoid output gate. Its f16
+  KV cache costs 12 KB per token.
 - **Parameters: 752M.** Embedding 254M (34%), MLP 264M (35%), DeltaNet 190M (25%),
   attention 44M (6%).
 - **Every token is memory-bound.** It reads all the weights once, so file size ≈
@@ -251,8 +321,8 @@ commands stay the same.
 | `src/tokenizer.c` | byte-level BPE + hand-written version of Qwen's pre-tokenizer regex |
 | `src/sampler.c` | greedy / temperature + top-p |
 | `scripts/export.py` | HF safetensors → flat `model.bin` / `tokenizer.bin` (stdlib only) |
-| `scripts/shrink.py` | `model.bin` → English-only vocabulary + int8/int4 matrices (numpy) |
-| `src/bench.c` | `bpb`: bits per byte · `mc`: multiple choice · `count`: token counts for `scripts/shrink.py` |
+| `scripts/shrink.py` | `model.bin` → English-only vocabulary + int8/int4 matrices, AWQ, mixed precision, low-rank (numpy) |
+| `src/bench.c` | `bpb`: bits per byte · `mc`: multiple choice · `calib`: activation statistics for AWQ · `count`: token counts for `scripts/shrink.py` |
 | `scripts/data.py` | downloads the corpus and the benchmark sets (pyarrow) |
 | `scripts/benchmark.py` | runs generation and quality smoke tests and saves measurements |
 | `tests/` | synthetic checkpoint tests and CPU/Metal parity checks |
@@ -282,7 +352,8 @@ remove CPU round trips. Add an `extern Backend backend_xxx;` and list it in
 ## Notes / simplifications
 
 - One token at a time, prompt included (no batched prefill).
-- Weights are bf16 (or int8/int4 after `scripts/shrink.py`); activations and state are f32.
+- Weights are bf16 (or int8/int4 after `scripts/shrink.py`); activations and the
+  recurrent state are f32, the KV cache f16.
 - The pre-tokenizer treats every non-ASCII byte as a letter. It's exact for ASCII
   and very close for everything else. There's no NFC normalization.
 - The chat template is hard-coded to non-thinking mode; `-r` gives raw completion.

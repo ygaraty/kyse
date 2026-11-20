@@ -40,7 +40,8 @@ typedef struct {
     float *hb, *hb2;             // mlp                                          [hidden_dim]
     float *logits;               // [vocab_size]
     float *att;                  // attention scores [n_heads, seq_len]
-    float *k_cache, *v_cache;    // [n_full_layers, seq_len, n_kv_heads*head_dim]
+    float *lr_mid, *lr_out;      // low-rank corrections: down x [max_rank], up (down x) [largest layer matrix rows]
+    _Float16 *k_cache, *v_cache; // [n_full_layers, seq_len, n_kv_heads*head_dim], f16
     float *conv_state;           // [n_deltanet_layers, conv_k-1, conv_dim]
     float *ssm_state;            // [n_deltanet_layers, lin_v_heads, lin_k_dim, lin_v_dim]
 } State;
@@ -49,7 +50,8 @@ typedef struct {
     Config c;
     const int32_t *full_attn;    // per layer: 1 = full attention, 0 = gated deltanet
     int seq_len;                 // context length the state is allocated for
-    WeightType mat_type;         // format of the layer matrices
+    WeightType mat_type;         // format of the layer matrices (unless listed per matrix)
+    int max_rank;                // largest low-rank correction of any matrix
     Mat embed, head;             // [vocab_size, dim]; head aliases embed when tied
     const float *final_norm;
     Layer *layers;

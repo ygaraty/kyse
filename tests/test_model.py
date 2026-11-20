@@ -107,6 +107,13 @@ class ModelTest(unittest.TestCase):
                     small = path / f'{quant}.bin'
                     shrink.shrink_model(model, small, [0, 2, 4, 6], quant, 'q8' if quant == 'q4' else quant)
                     subprocess.run([str(self.runner), str(small), str(int(tied))], check=True)
+                # mixed precision + AWQ, with made-up activation statistics (2 layers: 8 + 7 matrices)
+                import numpy as np
+                rng = np.random.default_rng(0)
+                stats = [rng.uniform(0.1, 3, c) for c in [32] * 4 + [32] + [32, 32, 64] + [32] * 3 + [32] + [32, 32, 64]]
+                small = path / 'mixed.bin'
+                shrink.shrink_model(model, small, [0, 2, 4, 6], 'q4', 'q8', ['*.w_down', '1.*'], stats, ['*.w_qkv', '*.wo', '*.w_up'], 8)
+                subprocess.run([str(self.runner), str(small), str(int(tied))], check=True)
                 if tied:
                     # v2's header ends four bytes earlier, with the same tensor alignment.
                     legacy = bytearray(model.read_bytes())
@@ -114,6 +121,36 @@ class ModelTest(unittest.TestCase):
                     legacy[84:88] = b'\0' * 4
                     model.write_bytes(legacy)
                     subprocess.run([str(self.runner), str(model), '1'], check=True)
+
+
+class AwqTest(unittest.TestCase):
+    def test_scaling_keeps_the_layer_function(self):
+        try:
+            import numpy as np
+            import shrink
+        except ImportError:
+            self.skipTest('numpy is required for AWQ validation')
+        rng = np.random.default_rng(1)
+        d, f = 64, 96
+        t = dict(ln1=rng.uniform(.5, 2, d).astype(np.float32), ln2=rng.uniform(.5, 2, d).astype(np.float32),
+                 **{n: rng.normal(size=(r, d)).astype(np.float32) for n, r in [('wq', 64), ('wk', 32), ('wv', 32)]},
+                 w_gate=rng.normal(size=(f, d)).astype(np.float32), w_up=rng.normal(size=(f, d)).astype(np.float32),
+                 w_down=rng.normal(size=(d, f)).astype(np.float32))
+        x = rng.normal(size=d).astype(np.float32) * rng.uniform(.1, 10, d).astype(np.float32)
+
+        def forward(t):
+            silu = lambda v: v / (1 + np.exp(-v))
+            n1, n2 = x * t['ln1'], x * t['ln2']
+            h = silu(t['w_gate'] @ n2) * (t['w_up'] @ n2)
+            return [t[n] @ n1 for n in ('wq', 'wk', 'wv')] + [t['w_down'] @ h]
+
+        before, ln = forward(t), [t['ln1'].copy(), t['ln2'].copy(), t['w_up'].copy()]
+        stats = {n: np.abs(x * t[ln]) + .1 for n, ln in (('wq', 'ln1'), ('w_gate', 'ln2'))}
+        stats['w_down'] = rng.uniform(.01, 5, f)
+        shrink.apply_awq(t, dict.fromkeys(t, 'q4'), stats)
+        self.assertFalse(all(np.array_equal(a, t[n]) for a, n in zip(ln, ('ln1', 'ln2', 'w_up'))))
+        for a, b in zip(before, forward(t)):
+            np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-3)
 
 
 if __name__ == '__main__':
