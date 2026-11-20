@@ -34,7 +34,43 @@ make
 ./qwen model.bin -b cpu -t 0 -i "..."        # reference CPU backend, greedy
 ```
 
-`./qwen` with no arguments lists every option (`-v` prints token ids and speed).
+`./qwen` with no arguments lists every option. Interactive chat prints a stats
+line to stderr after each reply: prompt/output token counts, prompt processing
+speed, TTFT, decode tok/s and ms/token, total time, context usage and stop reason.
+Use `-q` to hide stats, or `-v` to add token IDs and enable stats for one-shot
+replies as well.
+
+TTFT runs from the start of processing the submitted turn to the first output
+token being flushed, including tokenization, prompt evaluation and sampling;
+it excludes model loading and time spent typing. Prompt speed measures prompt
+evaluation through the first logits. Decode speed uses the intervals between
+output tokens, excluding the first-token wait and terminal EOS evaluation.
+Decode speed is `n/a` for zero- or one-token replies; TTFT is `n/a` when the
+model immediately returns EOS. Context usage counts evaluated tokens; the last
+emitted token is evaluated on the next step or closed by the next chat turn.
+
+## Local API for data jobs
+
+The [async Python server](server/README.md) exposes `/v1/completions`,
+`/v1/chat/completions`, SSE streaming, model discovery and token usage. The
+CFFI binding loads our C engine directly, keeps the model resident, and runs
+inference on a dedicated thread. Independent requests are queued.
+
+```sh
+make library
+python3 -m venv server/.venv
+server/.venv/bin/python -m pip install -r server/requirements.txt
+server/.venv/bin/python server/server.py --model en-9b-q8/model.bin --backend metal
+```
+
+Use `http://127.0.0.1:8000/v1` as an OpenAI client's `base_url`, with model
+`kyse` and any placeholder API key. See the server guide for async job and
+streaming examples, supported parameters and limits.
+
+A [near-32k context smoke test](results/context32k/README.md) passed on Q8/Metal:
+32,736 prompt tokens, successful retrieval from the beginning, and 2 GiB of KV
+cache. Its 54 min 33 s TTFT shows the current token-at-a-time prefill limit.
+Use `--context 32768 --timeout 7200` for comparable long API requests.
 
 ## Qwen3.5-9B (text only)
 
@@ -242,6 +278,10 @@ commands stay the same.
 | file | what |
 |---|---|
 | `src/main.c` | command line, chat template, prefill + decode loop |
+| `src/kyse.h` + `src/kyse.c` | opaque shared-library API with recoverable errors |
+| `server/native.py` | CFFI binding to the C inference library |
+| `src/worker.c` | optional isolated subprocess engine for the local API |
+| `server/` | async OpenAI-compatible local text completions server |
 | `src/model.c` | loads `model.bin`, lays out the state, wires the forward pass |
 | `src/ops_ref.c` | reference C implementation of every op (the readable spec of the math) |
 | `src/backend.h` | compute backend interface, matrix formats |

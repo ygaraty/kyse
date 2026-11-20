@@ -39,6 +39,7 @@ static int sample_topp(Sampler *s, const float *probs) {
     float cutoff = (1.0f - s->topp) / (n - 1);
     for (int i = 0; i < n; i++)
         if (probs[i] >= cutoff) s->buf[count++] = (ProbIndex){ probs[i], i };
+    if (!count) return argmax(probs, n);
     qsort(s->buf, count, sizeof(ProbIndex), by_prob_desc);
 
     float total = 0.0f;
@@ -56,8 +57,10 @@ static int sample_topp(Sampler *s, const float *probs) {
 }
 
 int sampler_sample(Sampler *s, float *logits) {
-    if (s->temperature == 0.0f) return argmax(logits, s->vocab_size);
-    for (int i = 0; i < s->vocab_size; i++) logits[i] /= s->temperature;
+    if (s->vocab_size == 1 || s->temperature == 0.0f || s->topp <= 0.0f)
+        return argmax(logits, s->vocab_size);
+    float max = logits[argmax(logits, s->vocab_size)];
+    for (int i = 0; i < s->vocab_size; i++) logits[i] = (logits[i] - max) / s->temperature;
     softmax(logits, s->vocab_size);
     return sample_topp(s, logits);
 }

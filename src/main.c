@@ -25,13 +25,37 @@ typedef struct {
     int end_of_text, im_end;  // token ids that end a reply
     int pos;      // next position in the context
     int max_new;  // per reply
-    bool verbose;
+    bool verbose, stats;
 } Session;
+
+typedef struct {
+    int prompt_tokens, output_tokens;
+    double start, prefill_start, ready, first, last, end;
+    const char *stop;
+} ReplyStats;
+
+static void print_stats(const Session *s, const ReplyStats *r) {
+    double prefill = r->ready - r->prefill_start;
+    double decode = r->last - r->first;
+    fprintf(stderr, "[%s] prompt: %d tok in %.3fs (%.1f tok/s) | output: %d tok | TTFT: ",
+            s->model.be->name, r->prompt_tokens, prefill,
+            prefill > 0 ? r->prompt_tokens / prefill : 0.0, r->output_tokens);
+    if (r->output_tokens) fprintf(stderr, "%.1f ms", 1000.0 * (r->first - r->start));
+    else fprintf(stderr, "n/a");
+    // The first token belongs to TTFT. Only subsequent token intervals measure decode speed.
+    if (r->output_tokens > 1 && decode > 0)
+        fprintf(stderr, " | decode: %.1f tok/s (%.2f ms/tok, %.3fs)",
+                (r->output_tokens - 1) / decode, 1000.0 * decode / (r->output_tokens - 1), decode);
+    else fprintf(stderr, " | decode: n/a");
+    fprintf(stderr, " | total: %.3fs | context: %d/%d tok | stop: %s\n",
+            r->end - r->start, s->pos, s->model.seq_len, r->stop);
+}
 
 // Feeds text at the current position, then samples and prints tokens until an
 // end token, max_new or the end of the context. Returns false if the text
 // did not fit into the context.
 static bool generate(Session *s, const char *text) {
+    ReplyStats stats = { .start = now() };
     int *tokens = malloc((strlen(text) + 1) * sizeof(int));
     int n = tokenizer_encode(&s->tok, text, tokens);
     if (n < 1 || s->pos + n >= s->model.seq_len) {
@@ -45,30 +69,34 @@ static bool generate(Session *s, const char *text) {
     }
 
     // prefill: all but the last token are only queued, never waited on
-    double t_start = now();
+    stats.prompt_tokens = n;
+    stats.prefill_start = now();
     for (int i = 0; i < n - 1; i++) model_forward(&s->model, tokens[i], s->pos++, false);
 
     // decode: one sync per token
     int token = tokens[n - 1], generated = 0;
-    double t_first = 0;
     while (generated < s->max_new && s->pos < s->model.seq_len) {
         float *logits = model_forward(&s->model, token, s->pos++, true);
-        if (!generated) t_first = now();
+        if (!generated) stats.ready = now();
         token = sampler_sample(&s->sampler, logits);
-        if (token == s->im_end || token == s->end_of_text) break;
+        if (token == s->im_end || token == s->end_of_text) {
+            stats.stop = "eos";
+            break;
+        }
         int len;
         const char *piece = tokenizer_decode(&s->tok, token, &len);
         fwrite(piece, 1, len, stdout);
         fflush(stdout);
+        stats.last = now();
+        if (!generated) stats.first = stats.last;
         generated++;
     }
-    double t_end = now();
+    stats.end = now();
+    stats.output_tokens = generated;
+    if (!stats.stop) stats.stop = generated >= s->max_new ? "token limit" : "context full";
     printf("\n");
     fflush(stdout);
-    if (s->verbose)
-        fprintf(stderr, "[%s] prompt: %d tok in %.2fs (%.1f tok/s) | generation: %d tok in %.2fs (%.1f tok/s)\n",
-                s->model.be->name, n, t_first - t_start, n / (t_first - t_start),
-                generated, t_end - t_first, generated / (t_end - t_first));
+    if (s->stats) print_stats(s, &stats);
     free(tokens);
     return true;
 }
@@ -129,7 +157,8 @@ static void chat(Session *s, const char *system) {
     for (int i = 0; i < N_BACKENDS; i++)
         fprintf(stderr, " %s%s", backends[i]->name, i == 0 ? " (default)" : "");
     fprintf(stderr, "\n"
-        "  -v          print token ids and speed\n");
+        "  -v          print token ids and stats (also for one-shot replies)\n"
+        "  -q          hide reply stats (chat shows stats by default)\n");
     exit(1);
 }
 
@@ -139,7 +168,7 @@ int main(int argc, char **argv) {
     int max_new = 1024, seq_len = 4096;
     float temperature = 0.7f, topp = 0.8f;
     uint64_t seed = (uint64_t)time(NULL);
-    bool raw = false, verbose = false;
+    bool raw = false, verbose = false, quiet = false;
     Backend *be = backends[0];
 
     for (int i = 2; i < argc; i++) {
@@ -147,6 +176,7 @@ int main(int argc, char **argv) {
         char flag = argv[i][1];
         if (flag == 'r') { raw = true; continue; }
         if (flag == 'v') { verbose = true; continue; }
+        if (flag == 'q') { quiet = true; continue; }
         if (i + 1 >= argc) usage();
         const char *arg = argv[++i];
         switch (flag) {
@@ -164,7 +194,9 @@ int main(int argc, char **argv) {
     }
     if (raw && !prompt) die("-r needs a prompt (-i)");
 
-    Session s = { .max_new = max_new, .verbose = verbose };
+    if (max_new <= 0) die("max tokens per reply (-n) must be positive");
+
+    Session s = { .max_new = max_new, .verbose = verbose, .stats = !quiet && (!prompt || verbose) };
     model_load(&s.model, model_path, be, seq_len);
     char *default_tokenizer = sibling_path(model_path, "tokenizer.bin");
     tokenizer_load(&s.tok, tokenizer_path ? tokenizer_path : default_tokenizer);

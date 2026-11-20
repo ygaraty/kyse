@@ -56,11 +56,20 @@ def main():
                                    '-t', 0, '-n', 64, '-v', '-i',
                                    'Explain how a rainbow forms, step by step, in plain English.'],
                                   args.output/f'{name}-generation-{repeat+1}.log')
-            match = re.search(r'generation: (\d+) tok in ([\d.]+)s \(([\d.]+) tok/s\)', output)
-            if not match:
-                raise ValueError('missing generation timing')
-            item['generation'].append(dict(tokens=int(match[1]), seconds=float(match[2]),
-                                           tokens_per_second=float(match[3]), wall_seconds=elapsed))
+            match = re.search(r'output: (\d+) tok .*?TTFT: ([\d.]+) ms .*?decode: ([\d.]+) tok/s \([\d.]+ ms/tok, ([\d.]+)s\)', output)
+            if match:
+                tokens, ttft, speed, seconds = match.groups()
+                trial = dict(tokens=int(tokens), seconds=float(seconds), tokens_per_second=float(speed),
+                             ttft_ms=float(ttft), timing='after_first_token')
+            else:
+                # Historical logs used the old CLI timing (including its token-count bias).
+                match = re.search(r'generation: (\d+) tok in ([\d.]+)s \(([\d.]+) tok/s\)', output)
+                if not match:
+                    raise ValueError('missing generation timing')
+                trial = dict(tokens=int(match[1]), seconds=float(match[2]),
+                             tokens_per_second=float(match[3]), timing='legacy')
+            trial['wall_seconds'] = elapsed
+            item['generation'].append(trial)
         item['generation_median_tokens_per_second'] = statistics.median(
             r['tokens_per_second'] for r in item['generation'])
         output, _ = run([ROOT/'bench', 'bpb', model, ROOT/'data/wiki.test.txt', '-b', args.backend,

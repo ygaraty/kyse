@@ -1,5 +1,6 @@
 # build outputs
 qwen
+qwen-worker
 bench
 __pycache__/
 
@@ -11,3 +12,13 @@ data/
 # downloaded checkpoints and local orchestration logs (raw benchmark logs stay tracked)
 /models/
 /results/*.log
+
+# local Python server environment
+/server/.venv/
+
+# compiled shared library
+/build/
+
+# generated long-context prompt and discarded calibration probe
+/results/context*/prompt.txt
+/results/context32k/initial-probe/

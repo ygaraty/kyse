@@ -49,6 +49,7 @@ static void map_weights(Model *m, const char *start, WeightType embed_type, bool
     m->embed = mat(&r, c->vocab_size, D);
     r.type = m->mat_type;
     m->layers = calloc(c->n_layers, sizeof(Layer));
+    if (!m->layers) die("out of memory");
     for (int l = 0; l < c->n_layers; l++) {
         Layer *L = &m->layers[l];
         L->ln1 = vec(&r, D);
@@ -115,7 +116,10 @@ void model_load(Model *m, const char *path, Backend *be, int seq_len) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) die("cannot open %s", path);
     struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size < 68) die("invalid model file: %s", path);
+    if (fstat(fd, &st) != 0 || st.st_size < 68) {
+        close(fd);
+        die("invalid model file: %s", path);
+    }
     m->data_size = (size_t)st.st_size;
     size_t page = (size_t)getpagesize();
     m->file_size = ((size_t)st.st_size + page - 1) / page * page;  // page-rounded so a GPU can wrap it

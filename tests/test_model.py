@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import struct
 import subprocess
@@ -14,9 +15,9 @@ export = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(export)
 
 
-def checkpoint(path, tied):
+def checkpoint(path, tied, vocab_size=32, zero_head=False):
     d, f, hd, nk, nv, dk, dv = 32, 64, 8, 2, 4, 8, 8
-    cfg = dict(hidden_size=d, intermediate_size=f, num_hidden_layers=2, vocab_size=32,
+    cfg = dict(hidden_size=d, intermediate_size=f, num_hidden_layers=2, vocab_size=vocab_size,
                num_attention_heads=4, num_key_value_heads=2, head_dim=hd,
                linear_num_key_heads=nk, linear_num_value_heads=nv,
                linear_key_head_dim=dk, linear_value_head_dim=dv, linear_conv_kernel_dim=4,
@@ -27,14 +28,14 @@ def checkpoint(path, tied):
 
     def tensor(name, rows, cols=None, norm=False):
         n = rows * (cols or 1)
-        values = [0.0 if norm else ((i * 17 + len(name)) % 29 - 14) / 128 for i in range(n)]
+        values = [0.0 if norm or (zero_head and name == "lm_head.weight") else ((i * 17 + len(name)) % 29 - 14) / 128 for i in range(n)]
         dtype = 'BF16' if cols else 'F32'
         raw = b''.join(struct.pack('<I', struct.unpack('<I', struct.pack('<f', v))[0])[2:]
                        for v in values) if cols else struct.pack('<%df' % n, *values)
         tensors[name] = (dtype, [rows, cols] if cols else [rows], raw)
 
     p = 'model.language_model.'
-    tensor(p + 'embed_tokens.weight', 32, d)
+    tensor(p + 'embed_tokens.weight', vocab_size, d)
     for l in range(2):
         q = p + f'layers.{l}.'
         for name in ('input_layernorm.weight', 'post_attention_layernorm.weight'):
@@ -59,7 +60,7 @@ def checkpoint(path, tied):
             tensor(q + 'mlp.' + name + '.weight', rows, cols)
     tensor(p + 'norm.weight', d, norm=True)
     if not tied:
-        tensor('lm_head.weight', 32, d)
+        tensor('lm_head.weight', vocab_size, d)
     index = {}
     for shard in range(2):
         name = f'model-{shard}.safetensors'
@@ -90,6 +91,59 @@ class ModelTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.temp.cleanup()
+
+    def test_reply_stats(self):
+        # A zero head deterministically emits token 0, including an EOS fixture.
+        subprocess.run(['make', 'qwen'], cwd=ROOT, check=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            checkpoint(path, False, vocab_size=261, zero_head=True)
+            export.export_model(path, path/'model.bin')
+
+            def tokenizer(eos=False):
+                tokens = [bytes([i]) for i in range(256)]
+                tokens[0], tokens[97] = tokens[97], tokens[0]  # token 0 emits 'a'
+                tokens += [b'<|im_start|>', b'<|im_end|>', b'<think>', b'</think>', b'<|endoftext|>']
+                special = list(range(256, 261))
+                if eos:
+                    tokens[0], tokens[257] = tokens[257], b''
+                    tokens[97] = b'a'
+                    special = [0, 256, 258, 259, 260]
+                with (path/'tokenizer.bin').open('wb') as out:
+                    out.write(struct.pack('<iii', len(tokens), len(special), max(map(len, tokens))))
+                    out.write(struct.pack('<%di' % len(special), *special))
+                    for token in tokens:
+                        out.write(struct.pack('<ii', -1, len(token)) + token)
+
+            def run(*args, text=None):
+                result = subprocess.run([str(ROOT/'qwen'), str(path/'model.bin'), '-b', 'cpu',
+                                         '-t', '0', '-c', '256', '-n', '3', *args],
+                                        input=text, capture_output=True, text=True, check=True)
+                self.assertNotRegex(result.stderr, r'\b(?:nan|inf)\b')
+                return result
+
+            tokenizer()
+            reply = run('-r', '-i', 'a', '-v')
+            self.assertIn('output: 3 tok', reply.stderr)
+            self.assertRegex(reply.stderr, r'TTFT: [\d.]+ ms.*decode: [\d.]+ tok/s')
+            self.assertIn('context: 3/256 tok | stop: token limit', reply.stderr)
+            self.assertEqual(reply.stdout, 'aaaa\n')  # echoed raw prompt + three output tokens
+            single = run('-r', '-i', 'a', '-v', '-n', '1')
+            self.assertIn('output: 1 tok', single.stderr)
+            self.assertIn('decode: n/a', single.stderr)
+            full = run('-r', '-i', 'a', '-v', '-n', '5', '-c', '3')
+            self.assertIn('context: 3/3 tok | stop: context full', full.stderr)
+            chat = run(text='a\nb\n/reset\na\n')
+            self.assertEqual(chat.stderr.count(' | TTFT:'), 3)
+            contexts = re.findall(r'context: (\d+)/256', chat.stderr)
+            self.assertGreater(int(contexts[1]), int(contexts[0]))
+            self.assertEqual(contexts[0], contexts[2])
+            self.assertNotIn(' | TTFT:', run('-q', text='a\n').stderr)
+            self.assertNotIn(' | TTFT:', run('-r', '-i', 'a').stderr)
+            tokenizer(eos=True)
+            empty = run('-r', '-i', 'a', '-v')
+            self.assertIn('output: 0 tok | TTFT: n/a | decode: n/a', empty.stderr)
+            self.assertIn('stop: eos', empty.stderr)
 
     def test_pipeline(self):
         for tied in (True, False):

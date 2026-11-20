@@ -1,0 +1,111 @@
+metal: Apple M5
+Model loaded with 32768 context in 0.50s
+prefill: 41/41 tokens (6.1s)
+Short-prompt smoke: {"text": "strawberry", "usage": {"prompt_tokens": 42, "completion_tokens": 3, "total_tokens": 45}, "finish_reason": "stop", "ttft_seconds": 6.3975144169526175, "total_seconds": 6.596406749973539, "stream_chunks": 3, "decode_chunks_per_second": 15.236247612736527}
+Long-prompt inference still running: 45s elapsed
+prefill: 1024/32735 tokens (67.4s)
+Long-prompt inference still running: 90s elapsed
+Long-prompt inference still running: 135s elapsed
+prefill: 2048/32735 tokens (135.2s)
+Long-prompt inference still running: 180s elapsed
+prefill: 3072/32735 tokens (205.4s)
+Long-prompt inference still running: 225s elapsed
+Long-prompt inference still running: 270s elapsed
+prefill: 4096/32735 tokens (278.2s)
+Long-prompt inference still running: 315s elapsed
+prefill: 5120/32735 tokens (353.2s)
+Long-prompt inference still running: 360s elapsed
+Long-prompt inference still running: 405s elapsed
+prefill: 6144/32735 tokens (431.0s)
+Long-prompt inference still running: 450s elapsed
+Long-prompt inference still running: 495s elapsed
+prefill: 7168/32735 tokens (510.8s)
+Long-prompt inference still running: 540s elapsed
+Long-prompt inference still running: 585s elapsed
+prefill: 8192/32735 tokens (592.5s)
+Long-prompt inference still running: 630s elapsed
+Long-prompt inference still running: 675s elapsed
+prefill: 9216/32735 tokens (676.7s)
+Long-prompt inference still running: 720s elapsed
+prefill: 10240/32735 tokens (763.3s)
+Long-prompt inference still running: 765s elapsed
+Long-prompt inference still running: 810s elapsed
+prefill: 11264/32735 tokens (852.2s)
+Long-prompt inference still running: 855s elapsed
+Long-prompt inference still running: 900s elapsed
+prefill: 12288/32735 tokens (942.7s)
+Long-prompt inference still running: 945s elapsed
+Long-prompt inference still running: 990s elapsed
+Long-prompt inference still running: 1035s elapsed
+prefill: 13312/32735 tokens (1036.5s)
+Long-prompt inference still running: 1080s elapsed
+Long-prompt inference still running: 1125s elapsed
+prefill: 14336/32735 tokens (1131.7s)
+Long-prompt inference still running: 1170s elapsed
+Long-prompt inference still running: 1215s elapsed
+prefill: 15360/32735 tokens (1229.4s)
+Long-prompt inference still running: 1260s elapsed
+Long-prompt inference still running: 1305s elapsed
+prefill: 16384/32735 tokens (1329.5s)
+Long-prompt inference still running: 1350s elapsed
+Long-prompt inference still running: 1395s elapsed
+prefill: 17408/32735 tokens (1431.7s)
+Long-prompt inference still running: 1440s elapsed
+Long-prompt inference still running: 1485s elapsed
+Long-prompt inference still running: 1530s elapsed
+prefill: 18432/32735 tokens (1537.5s)
+Long-prompt inference still running: 1575s elapsed
+Long-prompt inference still running: 1620s elapsed
+prefill: 19456/32735 tokens (1649.2s)
+Long-prompt inference still running: 1665s elapsed
+Long-prompt inference still running: 1710s elapsed
+Long-prompt inference still running: 1755s elapsed
+prefill: 20480/32735 tokens (1761.4s)
+Long-prompt inference still running: 1800s elapsed
+Long-prompt inference still running: 1845s elapsed
+prefill: 21504/32735 tokens (1876.1s)
+Long-prompt inference still running: 1890s elapsed
+Long-prompt inference still running: 1935s elapsed
+Long-prompt inference still running: 1980s elapsed
+prefill: 22528/32735 tokens (1993.4s)
+Long-prompt inference still running: 2025s elapsed
+Long-prompt inference still running: 2070s elapsed
+prefill: 23552/32735 tokens (2112.2s)
+Long-prompt inference still running: 2115s elapsed
+Long-prompt inference still running: 2160s elapsed
+Long-prompt inference still running: 2205s elapsed
+prefill: 24576/32735 tokens (2232.0s)
+Long-prompt inference still running: 2250s elapsed
+Long-prompt inference still running: 2295s elapsed
+Long-prompt inference still running: 2340s elapsed
+prefill: 25600/32735 tokens (2354.2s)
+Long-prompt inference still running: 2385s elapsed
+Long-prompt inference still running: 2430s elapsed
+Long-prompt inference still running: 2475s elapsed
+prefill: 26624/32735 tokens (2479.2s)
+Long-prompt inference still running: 2520s elapsed
+Long-prompt inference still running: 2565s elapsed
+prefill: 27648/32735 tokens (2605.7s)
+Long-prompt inference still running: 2610s elapsed
+Long-prompt inference still running: 2655s elapsed
+Long-prompt inference still running: 2700s elapsed
+prefill: 28672/32735 tokens (2735.1s)
+Long-prompt inference still running: 2745s elapsed
+Long-prompt inference still running: 2790s elapsed
+Long-prompt inference still running: 2835s elapsed
+prefill: 29696/32735 tokens (2866.1s)
+Long-prompt inference still running: 2880s elapsed
+Long-prompt inference still running: 2925s elapsed
+Long-prompt inference still running: 2970s elapsed
+prefill: 30720/32735 tokens (3000.5s)
+Long-prompt inference still running: 3015s elapsed
+Long-prompt inference still running: 3060s elapsed
+Long-prompt inference still running: 3105s elapsed
+prefill: 31744/32735 tokens (3137.2s)
+Long-prompt inference still running: 3150s elapsed
+Long-prompt inference still running: 3195s elapsed
+Long-prompt inference still running: 3240s elapsed
+prefill: 32735/32735 tokens (3272.0s)
+Long-prompt result: {"text": "strawberry", "usage": {"prompt_tokens": 32736, "completion_tokens": 3, "total_tokens": 32739}, "finish_reason": "stop", "ttft_seconds": 3272.9817655420047, "total_seconds": 3273.4033250830253, "stream_chunks": 3, "decode_chunks_per_second": 7.203442182084126}
+Recall passed: True
+prefill: 41/41 tokens (2.7s)
