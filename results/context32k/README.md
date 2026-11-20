@@ -65,11 +65,12 @@ not tested at 32k in this run.
 
 ## Reproduce
 
-From the repository root, with the compact model and `data/wiki.test.txt` available:
+The benchmark lives in the sibling Piara project. From the Kyse root, with the
+compact model and `data/wiki.test.txt` available:
 
 ```sh
 make library bench
-../piara/.venv/bin/python scripts/benchmark_context.py \
+uv run --project ../piara piara-benchmark-context \
   --model en-9b-q8/model.bin --backend metal \
   --context 32768 --prompt-tokens 32736 --max-tokens 32
 ```
@@ -81,7 +82,7 @@ code measures FP16, not the earlier results above.
 Run the API with a long enough timeout:
 
 ```sh
-../piara/.venv/bin/python ../piara/server.py \
+uv run --project ../piara piara-server \
   --model en-9b-q8/model.bin --backend metal --context 32768 --timeout 7200
 ```
 

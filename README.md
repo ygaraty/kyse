@@ -343,9 +343,8 @@ With Piara checked out alongside Kyse, run from the Kyse directory:
 
 ```sh
 make library
-python3 -m venv ../piara/.venv
-../piara/.venv/bin/python -m pip install -r ../piara/requirements.txt
-../piara/.venv/bin/python ../piara/server.py --model en-9b-q8/model.bin --backend metal
+uv sync --project ../piara
+uv run --project ../piara piara-server --model en-9b-q8/model.bin --backend metal
 ```
 
 Use `http://127.0.0.1:8000/v1` as an OpenAI client's `base_url`, with model
@@ -358,7 +357,8 @@ Q8/Metal: 32,736 prompt tokens and successful retrieval from the beginning.
 That run used the older FP32 KV cache (2 GiB) and took 54 min 33 s to reach
 the first token. The merged runtime uses FP16 KV (1 GiB at 32k); those historical
 timings are not a new measurement of FP16. Use `--context 32768 --timeout 7200`
-for comparable long API requests.
+for comparable long API requests. The benchmark itself is part of Piara
+(`piara-benchmark-context`).
 
 ## Measuring: `bench`
 
@@ -493,7 +493,6 @@ and the companion HTTP API and CFFI binding in `../piara/`.
 | `src/kyse.h` + `src/kyse.c` | opaque shared-library API with recoverable errors and bounded prefill |
 | `src/library_pool.m` | Metal autorelease pools for shared-library calls |
 | `src/worker.c` | optional isolated subprocess engine |
-| `scripts/benchmark_context.py` | reproducible near-window retrieval and timing smoke test |
 | `src/bench.c` | `bench`: bpb, mc, calib, count |
 | `src/model.c` | loads `model.bin`, lays out the state, wires the forward pass |
 | `src/ops_ref.c` | reference C implementation of every op (the readable spec of the math) |
@@ -510,9 +509,8 @@ export, vocabulary pruning, bf16/int8/int4, and mixed precision with AWQ and
 low-rank corrections. It then checks C inference, reset, snapshot/restore, and
 loading of older files. It also checks that AWQ's rescaling leaves a layer's
 output unchanged. `KYSE_TEST_METAL=1 make test` also compares Metal with the
-CPU reference. `make test-server SERVER_PYTHON=../piara/.venv/bin/python` also
-checks CFFI and worker HTTP engines, streaming, cancellation, native ownership
-and error recovery.
+CPU reference. The CFFI and worker HTTP engines, streaming, cancellation,
+native ownership and error recovery are tested in Piara.
 
 **File format:** `model.bin` is a small header followed by 64-byte-aligned
 tensors, memory-mapped at load time. Each version adds to the header:
