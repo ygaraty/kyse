@@ -1,0 +1,9 @@
+# build outputs
+qwen
+bench
+__pycache__/
+
+# exported / shrunk weights and downloaded data (large, regenerate them)
+*.bin
+en-*/
+data/
