@@ -5,10 +5,8 @@ Convert a Hugging Face Qwen3.5 checkpoint into two flat files the C code can mma
   tokenizer.bin  vocab (token bytes) + merge ranks
 
 Only uses the python standard library.
-
-usage: python3 scripts/export.py <hf_model_dir> <out_dir>
 """
-import json, os, struct, sys
+import json, os, struct
 from contextlib import ExitStack
 
 ALIGN = 64  # every tensor starts on a 64-byte boundary (nice for GPU loads)
@@ -41,8 +39,9 @@ def read_bf16(f, base, info):
 
 
 def export_model(hf_dir, out_path):
+    """Writes model.bin; returns its size."""
     with ExitStack() as stack:
-        _export_model(hf_dir, out_path, stack)
+        return _export_model(hf_dir, out_path, stack)
 
 
 def _export_model(hf_dir, out_path, stack):
@@ -152,7 +151,7 @@ def _export_model(hf_dir, out_path, stack):
     if not tied:
         mat("lm_head.weight")
     pad()
-    print("wrote %s (%.1f MB)" % (out_path, out.tell() / 1e6))
+    return out.tell()
 
 
 def bytes_to_unicode():
@@ -193,12 +192,15 @@ def export_tokenizer(hf_dir, out_path, vocab_size):
         for tok, r in zip(tokens, ranks):
             out.write(struct.pack("<ii", r, len(tok)))
             out.write(tok)
-    print("wrote %s" % out_path)
 
 
-if __name__ == "__main__":
-    hf_dir, out_dir = sys.argv[1], sys.argv[2]
+def export(hf_dir, out_dir):
+    """Writes <out_dir>/model.bin and <out_dir>/tokenizer.bin; returns the model size."""
+    config = os.path.join(hf_dir, "config.json")
+    if not os.path.exists(config):
+        raise ValueError("%s is not a Hugging Face checkpoint (no config.json)" % hf_dir)
     os.makedirs(out_dir, exist_ok=True)
-    cfg = json.load(open(os.path.join(hf_dir, "config.json")))["text_config"]
-    export_model(hf_dir, os.path.join(out_dir, "model.bin"))
+    cfg = json.load(open(config))["text_config"]
+    size = export_model(hf_dir, os.path.join(out_dir, "model.bin"))
     export_tokenizer(hf_dir, os.path.join(out_dir, "tokenizer.bin"), cfg["vocab_size"])
+    return size

@@ -14,6 +14,15 @@
 //       ending), as lm-evaluation-harness does. Item format: "label n" on a
 //       line, then the context and the n endings, each as "len\n<bytes>\n".
 //
+//   bench kl <model.bin> <text> <ref.bin> [-k chunks] [-l bytes] [-b backend] [-z tokenizer]
+//       Distance from a reference model, token by token, on the chunks bpb
+//       scores. When ref.bin does not exist, writes the model's top KL_TOP
+//       log-probs at every position to it (run this with the reference, e.g.
+//       the bf16 model). Otherwise reports the mean KL(ref || model) and how
+//       often both pick the same top token. The KL is over the reference's
+//       top tokens plus one bucket for all the others, a slight
+//       underestimate of the full KL. Both models need the same vocabulary.
+//
 //   bench calib <model.bin> <text> <stats.bin> [-k chunks] [-l bytes] [-b backend] [-z tokenizer]
 //       Activation statistics for `shrink.py --awq`: the mean |x| of every
 //       input channel of every layer matrix, over -k chunks of about -l bytes
@@ -137,6 +146,98 @@ static int bpb(int argc, char **argv) {
            (double)bytes / tokens, 1000.0 * secs / tokens, o.be->name);
 
     free(ids);
+    free(text);
+    tokenizer_free(&tok);
+    model_free(&m);
+    return 0;
+}
+
+#define KL_TOP 64
+
+// log-softmax of logits into lp; ids/lps get the KL_TOP most likely tokens, most likely first
+static void top_log_probs(const float *logits, int n, double *lp, int *ids, float *lps) {
+    float max = logits[0];
+    for (int j = 1; j < n; j++) if (logits[j] > max) max = logits[j];
+    double sum = 0.0;
+    for (int j = 0; j < n; j++) sum += exp(logits[j] - max);
+    double lse = max + log(sum);
+    int k = 0;
+    for (int j = 0; j < n; j++) {
+        lp[j] = logits[j] - lse;
+        if (k == KL_TOP && lp[j] <= lps[k - 1]) continue;
+        int i = k < KL_TOP ? k++ : k - 1;  // insertion into the sorted top list
+        for (; i > 0 && lps[i - 1] < lp[j]; i--) ids[i] = ids[i - 1], lps[i] = lps[i - 1];
+        ids[i] = j, lps[i] = (float)lp[j];
+    }
+}
+
+static int kl(int argc, char **argv) {
+    if (argc < 3) die("usage: bench kl <model.bin> <text> <ref.bin> [-k chunks] [-l bytes] [-b backend] [-z tokenizer]");
+    const char *model_path = argv[0], *ref_path = argv[2];
+    Options o = parse_options(argc - 3, argv + 3, 8);
+    FILE *ref = fopen(ref_path, "rb");
+    bool writing = !ref;
+    if (writing && !(ref = fopen(ref_path, "wb"))) die("cannot write %s", ref_path);
+    size_t size;
+    char *text = read_file(argv[1], &size);
+    Model m;
+    Tokenizer tok;
+    int start = load(&m, &tok, model_path, &o, 2 * (int)o.chunk_bytes + 16);
+    int V = m.c.vocab_size, header[2] = { KL_TOP, V };
+    if (writing) fwrite(header, sizeof(int), 2, ref);
+    else if (fread(header, sizeof(int), 2, ref) != 2 || header[0] != KL_TOP || header[1] != V)
+        die("%s is not a reference for this vocabulary", ref_path);
+
+    double *lp = malloc(V * sizeof(double)), total_kl = 0.0, worst = 0.0;
+    int ids[KL_TOP], ref_ids[KL_TOP];
+    float lps[KL_TOP], ref_lps[KL_TOP];
+    long rows = 0, same = 0;
+    int *tokens = malloc((size + 2) * sizeof(int));
+    int chunks = 0;
+    for (size_t off = 0; off < size && chunks < o.limit; chunks++) {
+        size_t len = chunk_len(text + off, o.chunk_bytes);
+        char saved = text[off + len];
+        text[off + len] = '\0';
+        tokens[0] = start;
+        int n = 1 + tokenizer_encode(&tok, text + off, tokens + 1);
+        text[off + len] = saved;
+        if (n > m.seq_len) die("chunk does not fit the context");
+        model_reset(&m);
+        for (int i = 0; i + 1 < n; i++, rows++) {
+            top_log_probs(model_forward(&m, tokens[i], i, true), V, lp, ids, lps);
+            if (writing) {
+                fwrite(ids, sizeof(int), KL_TOP, ref);
+                fwrite(lps, sizeof(float), KL_TOP, ref);
+                continue;
+            }
+            if (fread(ref_ids, sizeof(int), KL_TOP, ref) != KL_TOP || fread(ref_lps, sizeof(float), KL_TOP, ref) != KL_TOP)
+                die("%s has fewer positions than this text (different -k or -l?)", ref_path);
+            // KL(P || Q) over the reference's top tokens and the bucket of the rest
+            double d = 0.0, p_top = 0.0, q_top = 0.0;
+            for (int t = 0; t < KL_TOP; t++) {
+                double p = exp(ref_lps[t]);
+                d += p * (ref_lps[t] - lp[ref_ids[t]]);
+                p_top += p, q_top += exp(lp[ref_ids[t]]);
+            }
+            double p_rest = fmax(1.0 - p_top, 0.0), q_rest = fmax(1.0 - q_top, 1e-12);
+            if (p_rest > 0) d += p_rest * log(p_rest / q_rest);
+            total_kl += d;
+            if (d > worst) worst = d;
+            same += ids[0] == ref_ids[0];
+        }
+        off += len;
+        fprintf(stderr, "\rchunk %d/%d", chunks + 1, o.limit);
+        if (!writing) fprintf(stderr, ": KL %.4f nats/token so far", total_kl / rows);
+    }
+    fprintf(stderr, "\n");
+    if (writing)
+        printf("wrote %s: top %d log-probs at %ld positions of %s\n", ref_path, KL_TOP, rows, model_path);
+    else
+        printf("%s: KL %.4f nats/token (max %.2f) | same top token %.1f%% | %ld positions\n",
+               model_path, total_kl / rows, worst, 100.0 * same / rows, rows);
+    fclose(ref);
+    free(tokens);
+    free(lp);
     free(text);
     tokenizer_free(&tok);
     model_free(&m);
@@ -344,8 +445,9 @@ static int count(int argc, char **argv) {
 int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "bpb") == 0) return bpb(argc - 2, argv + 2);
     if (argc >= 2 && strcmp(argv[1], "mc") == 0) return mc(argc - 2, argv + 2);
+    if (argc >= 2 && strcmp(argv[1], "kl") == 0) return kl(argc - 2, argv + 2);
     if (argc >= 2 && strcmp(argv[1], "calib") == 0) return calib(argc - 2, argv + 2);
     if (argc >= 2 && strcmp(argv[1], "count") == 0) return count(argc - 2, argv + 2);
-    die("usage: bench bpb|mc <model.bin> <file> [options] | bench calib <model.bin> <text> <stats.bin> [options]"
+    die("usage: bench bpb|mc <model.bin> <file> [options] | bench kl|calib <model.bin> <text> <out.bin> [options]"
         " | bench count <tokenizer.bin> <text>...");
 }

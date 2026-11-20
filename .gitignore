@@ -11,3 +11,7 @@ data/
 # downloaded checkpoints and local orchestration logs (raw benchmark logs stay tracked)
 /models/
 /results/*.log
+
+# Python environment and caches
+.venv/
+.kyse/

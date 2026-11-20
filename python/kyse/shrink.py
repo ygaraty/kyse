@@ -1,32 +1,26 @@
 """
-Shrink a model.bin: keep only the tokens a corpus uses, and quantize the matrices.
+Compression: keep only the tokens a corpus uses, and quantize the matrices.
 
-  1. Vocabulary. Tokens that occur at least --min-count times in the corpus are
-     kept (counts come from `./bench count tokenizer.bin corpus.txt`), plus the
-     256 single bytes (so any text can still be encoded), the special tokens,
-     the words of the chat template in main.c, and every token the BPE builds on the way to a kept token (so text made of
-     kept tokens is tokenized exactly as before). Both the embedding table and the LM head keep only those rows.
+  1. Vocabulary. Tokens that occur at least min_count times in the corpus are
+     kept (counts come from `bench count`), plus the 256 single bytes (so any
+     text can still be encoded), the special tokens, the words of the chat
+     template in src/main.c, and every token the BPE builds on the way to a kept
+     token (so text made of kept tokens is tokenized exactly as before). Both
+     the embedding table and the LM head keep only those rows.
   2. Quantization. Every matrix is stored as int8 or int4 with one f16 scale per
-     group of 32 weights (see WeightType in backend.h). For int4 the scale of
+     group of 32 weights (see WeightType in src/backend.h). For int4 the scale of
      each group is picked from a few candidates to minimize the squared error.
-     --q8 keeps chosen layer matrices at int8 (mixed precision), --awq
+     `q8` patterns keep chosen layer matrices at int8 (mixed precision), AWQ
      rescales input channels by their activation size first (see AWQ below),
-     and --lowrank moves a matrix's largest directions into a small bf16
-     correction before quantizing the rest (see SVDQuant below).
-
-Writes <out_dir>/model.bin and <out_dir>/tokenizer.bin. Needs numpy.
-
-usage: python3 scripts/shrink.py <model.bin> <tokenizer.bin> <counts.txt> <out_dir>
-                        [--quant q8|q4|bf16] [--embed-quant q8|q4|bf16] [--min-count N]
-                        [--q8 PATTERNS] [--awq STATS] [--lowrank PATTERNS] [--rank R]
+     and `lowrank` patterns move a matrix's largest directions into a small
+     bf16 correction before quantizing the rest (see SVDQuant below).
 """
-import argparse, fnmatch, mmap, os, struct
+import fnmatch, mmap, struct
 import numpy as np
 
-ALIGN = 64  # must match export.py / model.c
-GROUP = 32  # QUANT_GROUP in backend.h
-TYPES = {"bf16": 0, "q8": 1, "q4": 2}  # WeightType in backend.h
-CHAT_WORDS = [b"system", b"user", b"assistant", b"\n", b"\n\n"]  # USER_TURN / SYSTEM_TURN in main.c
+from .modelfile import ALIGN, GROUP, TYPES, read_header
+
+CHAT_WORDS = [b"system", b"user", b"assistant", b"\n", b"\n\n"]  # USER_TURN / SYSTEM_TURN in src/main.c
 
 
 # ---------------------------------------------------------------------------
@@ -245,48 +239,39 @@ class Reader:
         return np.frombuffer(self.take(4 * n), "<f4").copy()
 
 
-def shrink_model(src, dst, keep, quant, embed_quant, q8=(), stats=None, lowrank=(), rank=16):
-    """q8: name patterns (fnmatch, e.g. "*.w_down" or "0.*") of layer matrices
-    kept at q8 whatever `quant` is; stats: read_stats() output to apply AWQ;
-    lowrank: patterns of layer matrices that get a rank-`rank` correction."""
+def unmatched(patterns, header):
+    """The patterns (as for shrink_model's q8 and lowrank) that match no layer matrix of the model."""
+    names = [name for name, _ in header.matrices() if name not in ("embed", "head")]
+    return [p for p in patterns if not any(fnmatch.fnmatchcase(n, p) for n in names)]
+
+
+def shrink_model(src, dst, keep, quant, embed_quant, q8=(), stats=None, lowrank=(), rank=16, progress=None):
+    """keep: the token ids to keep, in order (None keeps them all); q8: name
+    patterns (fnmatch, e.g. "*.w_down" or "0.*") of layer matrices kept at q8
+    whatever `quant` is; stats: read_stats() output to apply AWQ; lowrank:
+    patterns of layer matrices that get a rank-`rank` correction; progress:
+    called with (layers done, layers) after each layer.
+    Returns the size of the written file."""
     source = open(src, "rb")
     data = mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ)
-    assert bytes(data[:4]) == b"QW35", "not a model.bin"
-    version = struct.unpack_from("<i", data, 4)[0]
-    if version not in (1, 2, 3):
-        raise ValueError("unsupported model version")
-    ints = list(struct.unpack_from("<13i", data, 8))
-    floats = struct.unpack_from("<2f", data, 8 + 52)
-    D, F, L, V, nh, nkv, hd, _, lk, lv, dk, dv, K = ints
-    layer_types = struct.unpack_from("<%di" % L, data, 68)
-    off = 68 + 4 * L
-    if version >= 2:
-        assert struct.unpack_from("<ii", data, off) == (0, 0), "input must be a bf16 model.bin"
-        off += 8
-    untied = version >= 3 and struct.unpack_from("<i", data, off)[0]
-    if version >= 3:
-        off += 4
-    r = Reader(data, off)
-    key_dim, val_dim = lk * dk, lv * dv
-    conv_dim = 2 * key_dim + val_dim
-
-    # (name, shape) of each layer's tensors in model.bin order; 2-d ones are matrices
-    def layout(attn):
-        if attn:
-            mixer = [("wq", (2 * nh * hd, D)), ("wk", (nkv * hd, D)), ("wv", (nkv * hd, D)),
-                     ("wo", (D, nh * hd)), ("q_norm", (hd,)), ("k_norm", (hd,))]
-        else:
-            mixer = [("w_qkv", (conv_dim, D)), ("w_z", (val_dim, D)), ("w_a", (lv, D)), ("w_b", (lv, D)),
-                     ("w_out", (D, val_dim)), ("conv", (conv_dim * K,)), ("A_log", (lv,)),
-                     ("dt_bias", (lv,)), ("norm", (dv,))]
-        return [("ln1", (D,)), ("ln2", (D,))] + mixer + [("w_gate", (F, D)), ("w_up", (F, D)), ("w_down", (D, F))]
+    h = read_header(data)
+    if any(t != ("bf16", 0) for t in h.mat_types):
+        raise ValueError("%s is already compressed: start from the bf16 model.bin that `kyse export` writes" % src)
+    for p in unmatched(list(q8) + list(lowrank), h):
+        raise ValueError("pattern '%s' matches no layer matrix (names look like 3.w_down or *.wo)" % p)
+    ints, floats, layer_types, untied = list(h.ints), h.floats, h.layer_types, h.untied
+    D, L, V = ints[0], ints[2], ints[3]
+    if keep is None:
+        keep = list(range(V))
+    r = Reader(data, h.data_offset)
+    layout = h.layout
 
     kinds = [{n: "q8" if any(fnmatch.fnmatchcase("%d.%s" % (l, n), p) for p in q8) else quant
-              for n, shape in layout(layer_types[l]) if len(shape) == 2} for l in range(L)]
+              for n, shape in layout(l) if len(shape) == 2} for l in range(L)]
     ranks = [{n: rank if any(fnmatch.fnmatchcase("%d.%s" % (l, n), p) for p in lowrank) else 0 for n in kinds[l]}
              for l in range(L)]
     for l in range(L):
-        for n, shape in layout(layer_types[l]):
+        for n, shape in layout(l):
             if len(shape) == 2 and ranks[l][n] > min(shape):
                 raise ValueError("rank %d is too large for %d.%s %s" % (rank, l, n, shape))
     # the format list entry of every matrix in file order (WeightType + 256 * rank),
@@ -294,9 +279,10 @@ def shrink_model(src, dst, keep, quant, embed_quant, q8=(), stats=None, lowrank=
     mat_types = ([TYPES[embed_quant]] + [TYPES[kinds[l][n]] + 256 * ranks[l][n] for l in range(L) for n in kinds[l]]
                  + [TYPES[embed_quant]] * bool(untied))
     if stats is not None:
-        n = sum(len(k) for k in kinds)
-        if len(stats) != n:
-            raise ValueError("statistics are for %d matrices, the model has %d" % (len(stats), n))
+        shapes = [shape for l in range(L) for n, shape in layout(l) if len(shape) == 2]
+        if [len(x) for x in stats] != [shape[1] for shape in shapes]:
+            raise ValueError("the calibration statistics are for another model (%d matrices, this one has %d)"
+                             % (len(stats), len(shapes)))
         it = iter(stats)
         stats = [{name: next(it) for name in k} for k in kinds]
 
@@ -323,9 +309,9 @@ def shrink_model(src, dst, keep, quant, embed_quant, q8=(), stats=None, lowrank=
 
     table()
     for l in range(L):
-        t = {n: r.mat(*shape) if len(shape) == 2 else r.vec(*shape) for n, shape in layout(layer_types[l])}
+        t = {n: r.mat(*shape) if len(shape) == 2 else r.vec(*shape) for n, shape in layout(l)}
         scales = apply_awq(t, kinds[l], stats[l]) if stats is not None else {}
-        for n, shape in layout(layer_types[l]):
+        for n, shape in layout(l):
             pad()
             if len(shape) == 1:
                 out.write(t[n].astype("<f4").tobytes())
@@ -337,7 +323,8 @@ def shrink_model(src, dst, keep, quant, embed_quant, q8=(), stats=None, lowrank=
                 out.write(quantize(down, "bf16") + quantize(up, "bf16"))
             else:
                 out.write(quantize_rows(t[n], kinds[l][n]))
-        print("\rlayer %d/%d" % (l + 1, L), end="", flush=True)
+        if progress:
+            progress(l + 1, L)
     pad()
     out.write(r.vec(D).tobytes())
     if untied:
@@ -347,51 +334,4 @@ def shrink_model(src, dst, keep, quant, embed_quant, q8=(), stats=None, lowrank=
     out.close()
     data.close()
     source.close()
-    print()
     return size
-
-
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("model")
-    ap.add_argument("tokenizer")
-    ap.add_argument("counts", help="output of ./bench count")
-    ap.add_argument("out_dir")
-    ap.add_argument("--quant", choices=TYPES, default="q8", help="layer matrices (default q8)")
-    ap.add_argument("--embed-quant", choices=TYPES, help="embedding / LM head (default: q8 for q4, else --quant)")
-    ap.add_argument("--min-count", type=int, default=2, help="keep tokens seen at least this often (default 2)")
-    ap.add_argument("--q8", default="", help="comma-separated layer matrices kept at q8, as <layer>.<name> "
-                    "patterns, e.g. '*.w_down,0.*' (names as in model.h)")
-    ap.add_argument("--awq", metavar="STATS", help="activation-aware scaling from `bench calib` statistics")
-    ap.add_argument("--lowrank", default="", help="comma-separated layer matrices (patterns as for --q8) "
-                    "that get a bf16 low-rank correction")
-    ap.add_argument("--rank", type=int, default=16, help="rank of the --lowrank corrections (multiple of 4, default 16)")
-    a = ap.parse_args()
-    embed_quant = a.embed_quant or ("q8" if a.quant == "q4" else a.quant)
-
-    tokens, ranks, special = read_tokenizer(a.tokenizer)
-    counts = {}
-    for line in open(a.counts):
-        i, c = line.split()
-        counts[int(i)] = int(c)
-    keep = choose_vocab(tokens, ranks, special, counts, a.min_count)
-    new_id = {old: new for new, old in enumerate(keep)}
-    print("vocab: %d -> %d tokens" % (len(tokens), len(keep)))
-
-    os.makedirs(a.out_dir, exist_ok=True)
-    write_tokenizer(os.path.join(a.out_dir, "tokenizer.bin"), [tokens[i] for i in keep],
-                    [ranks[i] for i in keep], [new_id[i] for i in special])
-    q8 = [p for p in a.q8.split(",") if p]
-    lowrank = [p for p in a.lowrank.split(",") if p]
-    if a.rank % 4 or a.rank <= 0:
-        ap.error("--rank must be a positive multiple of 4")
-    stats = read_stats(a.awq) if a.awq else None
-    size = shrink_model(a.model, os.path.join(a.out_dir, "model.bin"), keep, a.quant, embed_quant, q8, stats,
-                        lowrank, a.rank)
-    print("wrote %s (%.1f MB, layers %s%s%s%s, embedding %s)" % (a.out_dir, size / 1e6, a.quant,
-          ", q8 " + a.q8 if q8 else "", ", AWQ" if stats else "",
-          ", rank %d on %s" % (a.rank, a.lowrank) if lowrank else "", embed_quant))
-
-
-if __name__ == "__main__":
-    main()

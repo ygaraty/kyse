@@ -1,17 +1,18 @@
 """Small deterministic checkpoints exercise export -> shrink -> C inference."""
-import importlib.util
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('export', ROOT / 'scripts/export.py')
-export = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(export)
+sys.path.insert(0, str(ROOT/'python'))
+from kyse import export  # noqa: E402
 
 
 def checkpoint(path, tied):
@@ -100,7 +101,7 @@ class ModelTest(unittest.TestCase):
                 export.export_model(path, model)
                 subprocess.run([str(self.runner), str(model), str(int(tied))], check=True)
                 try:
-                    import shrink
+                    from kyse import shrink
                 except ImportError:
                     self.skipTest('numpy is required for shrink validation')
                 for quant in ('bf16', 'q8', 'q4'):
@@ -127,7 +128,7 @@ class AwqTest(unittest.TestCase):
     def test_scaling_keeps_the_layer_function(self):
         try:
             import numpy as np
-            import shrink
+            from kyse import shrink
         except ImportError:
             self.skipTest('numpy is required for AWQ validation')
         rng = np.random.default_rng(1)
@@ -153,7 +154,81 @@ class AwqTest(unittest.TestCase):
             np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-3)
 
 
+class CliTest(unittest.TestCase):
+    """The `kyse` command on the small checkpoint, without the C bench tool (token counts given)."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            from kyse import shrink
+        except ImportError:
+            raise unittest.SkipTest('numpy is required for the kyse command')
+        cls.temp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.temp.name)
+        hf, cls.src = cls.root / 'hf', cls.root / 'src'
+        hf.mkdir()
+        cls.src.mkdir()
+        checkpoint(hf, True)
+        export.export_model(hf, cls.src / 'model.bin')
+        # 32 tokens: the chat template's words, two pairs and single bytes
+        tokens = [b'system', b'user', b'assistant', b'\n', b'\n\n', b'ab', b'cd'] + [bytes([c]) for c in b'abcdefghijklmnopqrstuvwxy']
+        shrink.write_tokenizer(cls.src / 'tokenizer.bin', tokens, [-1] * 32, [])
+        (cls.root / 'counts.txt').write_text('5 10\n6 1\n')  # "ab" is common, "cd" is not
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temp.cleanup()
+
+    def kyse(self, *args):
+        from kyse.cli import main
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main([str(a) for a in args])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_compress_and_inspect(self):
+        out = self.root / 'int4'
+        code, _, err = self.kyse('compress', self.src, out, '-p', 'int4-plain', '--int8', '*.wo',
+                                 '--counts', self.root / 'counts.txt')
+        self.assertEqual(code, 0, err)
+        self.assertIn('vocabulary 32 -> 31 tokens', err)
+        code, text, _ = self.kyse('inspect', out)
+        self.assertEqual(code, 0)
+        self.assertIn('vocabulary 31', text)
+        self.assertRegex(text, r'wo\s+int8\n')
+        self.assertRegex(text, r'w_gate\s+int4 ×2')
+        self.assertRegex(text, r'embed\s+int8')
+        # a second run must not overwrite without --force
+        code, _, err = self.kyse('compress', self.src, out, '-p', 'int4-plain', '--counts', self.root / 'counts.txt')
+        self.assertEqual(code, 1)
+        self.assertIn('--force', err)
+
+    def test_keep_vocab_copies_the_tokenizer(self):
+        out = self.root / 'int8'
+        code, _, err = self.kyse('compress', self.src, out, '--keep-vocab')
+        self.assertEqual(code, 0, err)
+        self.assertEqual((out / 'tokenizer.bin').read_bytes(), (self.src / 'tokenizer.bin').read_bytes())
+
+    def test_mistakes_are_explained(self):
+        code, _, err = self.kyse('compress', self.src, self.root / 'x', '--keep-vocab', '--int8', '*.w_dwn')
+        self.assertEqual(code, 1)
+        self.assertIn("'*.w_dwn' matches no layer matrix", err)
+        code, _, err = self.kyse('compress', self.src, self.root / 'x', '-p', 'int4', '--keep-vocab', '--calib-text', self.root / 'missing.txt')
+        self.assertEqual(code, 1)
+        self.assertIn('calibration needs English text', err)
+        code, _, err = self.kyse('compress', self.root / 'nowhere', self.root / 'x', '--keep-vocab')
+        self.assertEqual(code, 1)
+        self.assertIn('no model at', err)
+        self.assertFalse((self.root / 'x').exists())
+
+    def test_dry_run_writes_nothing(self):
+        code, _, err = self.kyse('compress', self.src, self.root / 'dry', '-p', 'int4-mixed', '--counts',
+                                 self.root / 'counts.txt', '--calib-text', self.root / 'counts.txt', '-n')
+        self.assertEqual(code, 0, err)
+        self.assertIn('int4 with AWQ; int8: *.wo, *.w_out, *.w_down', err)
+        self.assertFalse((self.root / 'dry').exists())
+        self.assertFalse((self.src / '.kyse').exists())
+
+
 if __name__ == '__main__':
-    import sys
-    sys.path.insert(0, str(ROOT/'scripts'))
     unittest.main()

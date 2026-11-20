@@ -1,0 +1,22 @@
+[project]
+name = "kyse"
+version = "0.1.0"
+description = "Compress Qwen3.5 models for English: vocabulary pruning, int8/int4, AWQ and mixed precision"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+data = ["pyarrow>=14"]  # `kyse data` reads parquet files
+
+[project.scripts]
+kyse = "kyse.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.8,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "python"

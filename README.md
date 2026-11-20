@@ -13,17 +13,19 @@ reference, Apple Accelerate, and Metal.
 
 ### Qwen3.5-0.8B (Apple M1, Metal)
 
-| model | file size | smaller | speed | bits/byte ↓ | ARC-Easy | HellaSwag |
-|---|---:|---:|---:|---:|---:|---:|
-| original (bf16) | 1,506 MB | | 30 tok/s | 1.061 | 57.6% | 45.0% |
-| English vocabulary (bf16) | 1,104 MB | 27% | 42 tok/s | 1.077 | 61.2% | 45.0% |
-| **English int8** | **588 MB** | **61%** | **70 tok/s** | **1.077** | **61.2%** | **46.2%** |
-| **English int4 mixed** | **408 MB** | **73%** | **~80 tok/s¹** | **1.077** | **59.2%** | **41.2%** |
-| English int4 (plain) | 339 MB | 77% | 87 tok/s | 1.139 | 57.2% | 37.5% |
+| model | file size | smaller | speed | bits/byte ↓ | KL ↓ | ARC-Easy | HellaSwag |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| original (bf16) | 1,506 MB | | 30 tok/s | 1.061 | | 57.6% | 45.0% |
+| English vocabulary (bf16) | 1,104 MB | 27% | 42 tok/s | 1.077 | 0 | 61.2% | 45.0% |
+| **English int8** | **588 MB** | **61%** | **70 tok/s** | **1.077** | **0.0006** | **61.2%** | **46.2%** |
+| **English int4 mixed** | **408 MB** | **73%** | **~80 tok/s¹** | **1.077** | **0.052** | **59.2%** | **41.2%** |
+| English int4 (plain) | 339 MB | 77% | 87 tok/s | 1.139 | 0.118 | 57.2% | 37.5% |
 
-- **English int8:** the safe choice, with no measurable loss on top of the
-  vocabulary change.
-- **English int4 mixed:** the smallest model with int8's quality.
+- **English int8:** the safe choice. It is practically the same model as the
+  bf16 one: the same top token at 98.3% of positions.
+- **English int4 mixed:** int8's bits/byte at 408 MB, but not int8's model.
+  KL shows it still moves about half as far from the original as plain int4,
+  and picks a different top token at 12.5% of positions (int8: 1.7%).
 - **Plain int4:** smaller still, but it visibly loses quality.
 
 How to read the columns:
@@ -32,6 +34,10 @@ How to read the columns:
   held-out English (WikiText-2 test, 36 KB). Lower is better. It doesn't depend
   on the tokenizer, so models with different vocabularies compare fairly. For
   scale: the English vocabulary costs 1.5%, and plain int4 costs 5.8%.
+- **KL** is how far the model's predictions moved from the English bf16
+  model's, in nats per token (`bench kl`, 4,049 WikiText-2 positions). Zero
+  means the same model. Unlike bits/byte, gains and losses on different tokens
+  don't cancel out.
 - **ARC-Easy** (250 science questions, ±3.1 points) is accuracy.
 - **HellaSwag** (80 sentence completions, ±5.5) is length-normalized accuracy.
   These multiple-choice samples are small and only catch large changes.
@@ -58,7 +64,7 @@ run on 9B yet.
 
 ## The compression methods
 
-Every method below is an option of `scripts/shrink.py`, except the f16 KV
+Every method below is an option of `kyse compress`, except the f16 KV
 cache, which is built into the runtime.
 
 | method | what it shrinks | goal | 0.8B result |
@@ -67,7 +73,7 @@ cache, which is built into the runtime.
 | [int8](#2-int8-quantization) | every matrix | half the bytes per weight | −516 MB, no measurable loss |
 | [int4](#3-int4-quantization) | layer matrices | a quarter of the bytes per weight | −249 MB more, +5.8% bits/byte |
 | [AWQ](#4-awq-activation-aware-scaling) | int4 error | protect weights that see large inputs | recovers 35% of the int4 loss, free |
-| [mixed precision](#5-mixed-precision) | int4 error | spend bytes where int4 hurts most | recovers ~100% for +69 MB |
+| [mixed precision](#5-mixed-precision) | int4 error | spend bytes where int4 hurts most | int8's bits/byte for +69 MB, but only 57% of the KL gap |
 | [low-rank correction](#6-low-rank-correction) | int4 error | move outlier directions to bf16 | recovers 50% for +2 MB; not worth it |
 | [f16 KV cache](#7-f16-kv-cache) | memory in use | halve the attention cache | −50 MB at 4K context, no loss |
 
@@ -80,7 +86,7 @@ for every row on every token. In the original 0.8B model that is a third of
 each token's work.
 
 **How:** `bench count` tokenizes 45 MB of English (WikiText-2 train,
-Dolly-15k, TinyStories). `shrink.py` keeps the tokens seen at least twice
+Dolly-15k, TinyStories). `kyse compress` keeps the tokens seen at least twice
 (`--min-count`), plus:
 
 - all 256 single bytes, so any text still encodes (rare words just take more
@@ -131,7 +137,7 @@ rounding error is multiplied by its input, so errors on the input channels
 that carry large activations hurt most.
 
 **How:** `bench calib` runs the model on 9K tokens of English and records the
-mean |x| of every input channel of every matrix. `shrink.py --awq` then scales
+mean |x| of every input channel of every matrix. `kyse compress --awq` then scales
 those columns up by s = mean|x|^α before quantizing, so they get relatively
 finer steps. It folds 1/s into whatever produced the input, so the model
 computes exactly the same function: the RMSNorm weights, or the rows of `w_up`
@@ -156,8 +162,11 @@ to 100 times the median size. Their int4 error is twice that of every other
 matrix.
 
 **Result:** keeping `wo` and `w_out` at int8 (50M weights, +25 MB) recovers
-81% of the int4 loss. Adding `w_down` (+44 MB) recovers all of it. That is
-the **int4 mixed** model: int8's bits/byte at 408 MB instead of 588.
+81% of the int4 bits/byte loss. Adding `w_down` (+44 MB) recovers all of it.
+That is the **int4 mixed** model: int8's bits/byte at 408 MB instead of 588.
+KL tells a less flattering story: it closes only 57% of the gap between
+plain int4 and int8. On bits/byte, tokens that got better hide tokens that
+got worse; KL counts both.
 
 ### 6. Low-rank correction
 
@@ -169,10 +178,11 @@ strongest directions, found by an SVD weighted by input size and kept in bf16,
 plus a residual that gets quantized. The runtime adds the correction with two
 small extra matrix-vector products.
 
-**Result:** not worth it here. On `wo`/`w_out` it recovers a third as much as
-int8 does, for a tenth of the bytes (+2 MB). On every matrix it costs 20 MB,
-does worse than on those two alone, and slows decoding by about 30%. It stays
-available as an option.
+**Result:** mostly not worth it here. On `wo`/`w_out` it recovers a third as
+much as int8 does, for a tenth of the bytes (+2 MB). On every matrix it costs
+20 MB and slows decoding by about 30%. By KL it does better than bits/byte
+suggests: int8 `wo`/`w_out` plus rank 16 on everything else (382 MB) is as
+close to bf16 as int4 mixed (408 MB). It stays available as an option.
 
 ### 7. f16 KV cache
 
@@ -194,90 +204,130 @@ same bits/byte at 4K and 16K-byte contexts.
   bits carry only 2.7 bits of information, so about 67% of the size is
   possible losslessly. It isn't implemented, and it competes with int8 rather
   than adding to it.
+- **MLX's affine int4** (a scale and a bias per group of 64, the format
+  [TensorFold](https://github.com/ashhart/TensorFold) and MLX serve), at the
+  same 4.5 bits per weight as ours. `kyse formats` measures every
+  format's activation-weighted error on the real weights before any kernel is
+  written. Plain affine has 6% more error than our int4. With a searched
+  range it has 2.6% less, short of the 10% gain we set in advance as worth
+  a new format. Affine at groups of 32 has 26% less error, but costs 5 bits
+  per weight, and int8 on a few matrices buys far more for those bytes. Raw output:
+  [results/0.8b/formats.txt](results/0.8b/formats.txt).
+- **3-bit weights** have 3.9–4.4× the error of int4 at 3.5 bits per weight.
+  int4 alone already costs 5.8% bits/byte, so 3-bit needs trained
+  corrections, not just better rounding.
 
 All the int4 variants side by side, with every metric:
 [Detailed results](#detailed-results).
 
-## How to compress a model
+## How to compress a model: `kyse`
 
-You need Python 3 with numpy (compression) and pyarrow (data download), and
-a C compiler. On macOS the Metal backend builds automatically.
+`kyse` is the compression tool, a Python package managed with
+[uv](https://docs.astral.sh/uv/). It calls the C `bench` tool for the steps
+that run the model, so build that first:
 
 ```sh
-make                                             # builds ./qwen and ./bench
+make                                    # builds ./qwen and ./bench
+uv sync --extra data                    # installs kyse (numpy; pyarrow for `kyse data`)
+```
 
-# 1. get the model and convert it to model.bin + tokenizer.bin (stdlib only)
+Then run it with `uv run kyse`. To have `kyse` on your PATH everywhere, run
+`uv tool install --editable '.[data]'` instead. From a checkpoint to a
+compressed model:
+
+```sh
 hf download Qwen/Qwen3.5-0.8B --local-dir ../models/qwen3.5-0.8b
-python3 scripts/export.py ../models/qwen3.5-0.8b .
-
-# 2. English data: the vocabulary corpus and the benchmark sets (~52 MB)
-pip install numpy pyarrow
-python3 scripts/data.py data
-
-# 3. which tokens English uses (for the vocabulary)
-./bench count tokenizer.bin data/english.txt > data/counts.txt
-
-# 4. activation statistics (for AWQ; ~15 min on an M1)
-./bench calib model.bin data/english.txt data/calib.bin -k 32 -l 1024
+uv run kyse export ../models/qwen3.5-0.8b qwen-0.8b     # -> qwen-0.8b/model.bin + tokenizer.bin (bf16)
+uv run kyse data                                        # English corpus and benchmark sets into data/ (~52 MB)
+uv run kyse compress qwen-0.8b en-int4 -p int4-mixed    # -> en-int4/model.bin + tokenizer.bin
+uv run kyse inspect en-int4                             # what ended up in the file
+./qwen en-int4/model.bin                                # chat with it
 ```
 
-Then pick a recipe. Each writes `<out_dir>/model.bin` and `<out_dir>/tokenizer.bin`:
+`kyse compress` prints its plan before it starts, and `-n` prints only the
+plan. It counts tokens on `data/english.txt` to choose the vocabulary, and
+calibrates for AWQ when the preset needs it (about 15 minutes for the 0.8B on
+an M1). Both results are cached in `<source>/.kyse`, so the next compression
+of the same model starts right away.
+
+### Presets
+
+| preset | layers | where int8 is kept | 0.8B result |
+|---|---|---|---|
+| `int8` (default) | int8 | everywhere | 588 MB, no measurable loss |
+| `int4-mixed` | int4 + AWQ | `wo`, `w_out`, `w_down` | 408 MB, int8's bits/byte; KL about half of int4's |
+| `int4` | int4 + AWQ | embedding only | 339 MB, +3.8% bits/byte |
+| `int4-plain` | int4, no calibration | embedding only | 339 MB, +5.8% bits/byte |
+| `bf16` | bf16 | | 1,104 MB: vocabulary pruning only |
+
+Every preset prunes the vocabulary. The options below adjust a preset:
 
 ```sh
-# English int8: the safe choice (steps 1-3 only)
-python3 scripts/shrink.py model.bin tokenizer.bin data/counts.txt en-q8 --quant q8
-
-# English int4 mixed: int8 quality, 30% smaller than int8
-python3 scripts/shrink.py model.bin tokenizer.bin data/counts.txt en-q4-mixed \
-    --quant q4 --awq data/calib.bin --q8 '*.wo,*.w_out,*.w_down'
-
-# English int4: smallest, with a visible quality loss
-python3 scripts/shrink.py model.bin tokenizer.bin data/counts.txt en-q4 --quant q4
+kyse compress qwen-0.8b en-int4 -p int4 --int8 '*.wo,*.w_out'     # int8 on two matrices only
+kyse compress qwen-0.8b en-int8-all --keep-vocab                   # keep all 248K tokens
+kyse compress qwen-0.8b en-int4 -p int4 --lowrank '*.wo' --rank 16
 ```
-
-Check the result, and compare it with the original:
-
-```sh
-./bench bpb en-q4-mixed/model.bin data/wiki.test.txt -k 8    # bits per byte
-./bench mc  en-q4-mixed/model.bin data/arc_easy.txt -k 250   # multiple choice
-./bench mc  en-q4-mixed/model.bin data/hellaswag.txt -k 80
-./qwen en-q4-mixed/model.bin                                 # chat with it
-```
-
-### `shrink.py` options
 
 | option | default | effect |
 |---|---|---|
-| `--quant q8\|q4\|bf16` | `q8` | format of the layer matrices |
-| `--embed-quant q8\|q4\|bf16` | `q8` for q4, else `--quant` | format of the embedding and output head |
+| `-p, --preset NAME` | `int8` | the starting point, from the table above |
+| `-n, --dry-run` | | print the plan and stop |
+| `-f, --force` | | replace a model already in the output directory |
+| `--corpus FILE...` | `data/english.txt` | English text that decides the kept tokens |
 | `--min-count N` | 2 | keep tokens seen at least N times in the corpus |
-| `--awq STATS` | off | AWQ scaling from `bench calib` statistics |
-| `--q8 PATTERNS` | none | matrices kept at int8, as comma-separated `<layer>.<name>` patterns |
+| `--keep-vocab` | | keep every token |
+| `--counts FILE` | | token counts from `bench count`, instead of counting |
+| `--layers bf16\|int8\|int4` | preset | format of the layer matrices |
+| `--embed bf16\|int8\|int4` | preset | format of the embedding and output head |
+| `--int8 PATTERNS` | preset | layer matrices kept at int8 (`''` for none) |
+| `--awq`, `--no-awq` | preset | AWQ scaling of int4 matrices |
 | `--lowrank PATTERNS` | none | matrices that get a bf16 low-rank correction |
 | `--rank R` | 16 | rank of those corrections (a multiple of 4) |
+| `--calib-text FILE` | first corpus file | text to calibrate on |
+| `--calib STATS` | | statistics from `bench calib`, instead of calibrating |
+| `--bench PATH` | `./bench` | the C tool (also `$KYSE_BENCH`) |
 
-Matrix names, as in `src/model.h`:
+Patterns are comma-separated `<layer>.<name>` globs: `'*.w_down'` is every
+layer's `w_down`, `'0.*'` all of layer 0. A pattern that matches nothing is an
+error, so a typo can't silently do nothing. The matrix names, as in
+`src/model.h` and `kyse inspect`:
 
 - attention layers: `wq`, `wk`, `wv`, `wo`;
 - DeltaNet layers: `w_qkv`, `w_z`, `w_a`, `w_b`, `w_out`;
 - MLP: `w_gate`, `w_up`, `w_down`.
 
+### The other commands
+
+| command | what it does |
+|---|---|
+| `kyse export <checkpoint> <out_dir>` | Hugging Face safetensors → bf16 `model.bin` + `tokenizer.bin` |
+| `kyse data [out_dir]` | downloads the English corpus and the benchmark sets (default `data/`) |
+| `kyse inspect <model>...` | architecture, size, bits per weight and the format of every matrix |
+| `kyse formats <model>` | compares candidate weight formats by activation-weighted error (research) |
+
+Measure a result with `bench` (see [Measuring](#measuring-bench)):
+
+```sh
+./bench bpb en-int4/model.bin data/wiki.test.txt -k 8    # bits per byte
+./bench mc  en-int4/model.bin data/arc_easy.txt -k 250   # multiple choice
+./bench mc  en-int4/model.bin data/hellaswag.txt -k 80
+```
+
 ### Qwen3.5-9B
 
 The same steps work for 9B. Its output head is a separate table from its
-embedding; both get the same vocabulary pruning, and `--embed-quant` sets the
+embedding; both get the same vocabulary pruning, and `--embed` sets the
 format of both.
 
 ```sh
 hf download Qwen/Qwen3.5-9B --revision c202236235762e1c871ad0ccb60c8ee5ba337b9a --local-dir models/qwen3.5-9b
-python3 scripts/export.py models/qwen3.5-9b models/9b
-./bench count models/9b/tokenizer.bin data/english.txt > data/counts-9b.txt
-python3 scripts/shrink.py models/9b/model.bin models/9b/tokenizer.bin data/counts-9b.txt en-9b-q8 --quant q8
+uv run kyse export models/qwen3.5-9b models/9b
+uv run kyse compress models/9b en-9b-q8
 python3 scripts/benchmark.py models/9b en-9b-q8 --hellaswag-items 7    # the 9B smoke tests
 ```
 
-The exporter streams the safetensors shards, and `shrink.py` memory-maps its
-input, but individual matrices are still converted in memory. Allow about
+The exporter streams the safetensors shards, and `kyse compress` memory-maps
+its input, but individual matrices are still converted in memory. Allow about
 18 GB for the bf16 export.
 
 ## Chatting with the models: `qwen`
@@ -321,10 +371,25 @@ Backends:
 |---|---|
 | `bench bpb <model> <text> [-k chunks] [-l bytes]` | bits per byte: cuts the text into chunks of ~4 KB, each scored from a fresh state |
 | `bench mc <model> <items> [-k items]` | multiple choice: picks the ending with the highest log-likelihood |
-| `bench calib <model> <text> <out> [-k chunks] [-l bytes]` | activation statistics for `shrink.py --awq` |
-| `bench count <tokenizer> <text>...` | token counts for `shrink.py` |
+| `bench kl <model> <text> <ref.bin> [-k chunks] [-l bytes]` | distance from a reference model: KL per token and top-token agreement |
+| `bench calib <model> <text> <out> [-k chunks] [-l bytes]` | activation statistics for AWQ (`kyse compress` runs it) |
+| `bench count <tokenizer> <text>...` | token counts for the vocabulary (`kyse compress` runs it) |
 
-`bench bpb`, `mc` and `calib` take `-b <backend>` and `-z <tokenizer>` too.
+`bench bpb`, `mc`, `kl` and `calib` take `-b <backend>` and `-z <tokenizer>` too.
+
+`bench kl` measures how far a compressed model has moved from the original,
+on the same chunks `bpb` scores. The first run, with the reference model, has
+no `ref.bin` yet and writes the reference's 64 most likely tokens and their
+log-probs at every position. Later runs compare against them:
+
+```sh
+./bench kl en-bf16/model.bin data/wiki.test.txt data/kl-ref.bin -k 4   # writes the reference
+./bench kl en-q4/model.bin   data/wiki.test.txt data/kl-ref.bin -k 4   # compares
+```
+
+KL counts every change in the predicted distribution, not only the change in
+the probability of the right token, so it separates variants that bits/byte
+and the benchmarks cannot tell apart.
 
 `bench mc` scores like lm-evaluation-harness:
 
@@ -332,7 +397,7 @@ Backends:
 - `acc_norm` divides it by the ending's length in bytes.
 
 The context runs once, and each ending branches from a snapshot of the
-recurrent state (`model_snapshot`). `scripts/data.py` writes the item files.
+recurrent state (`model_snapshot`). `kyse data` writes the item files.
 
 ## Detailed results
 
@@ -347,6 +412,8 @@ Apple M1 (16 GB), Metal backend:
 | generation speed | 30 tok/s | 42 tok/s | 70 tok/s | 87 tok/s |
 | WikiText-2 bits/byte ↓ | 1.0611 | 1.0766 | 1.0771 | 1.1393 |
 | WikiText-2 top-1 next token | 40.6% | 40.3% | 40.3% | 38.6% |
+| KL from English bf16 (nats/token) ↓ | | 0 | 0.0006 | 0.118 |
+| same top token as English bf16 | | 100% | 98.3% | 81.2% |
 | ARC-Easy acc (250 questions, ±3.1) | 57.6% | 61.2% | 61.2% | 57.2% |
 | ARC-Easy acc_norm | 50.4% | 54.0% | 54.0% | 52.8% |
 | HellaSwag acc (80 items, ±5.5) | 37.5% | 36.2% | 36.2% | 33.8% |
@@ -359,20 +426,20 @@ re-measured with f16: identical, apart from one ARC-Easy question (acc_norm
 ### int4 variants (0.8B)
 
 All with the English vocabulary, an int8 embedding and the f16 KV cache. The
-"loss recovered" column is the share of plain int4's bits/byte loss against
-int8 that the variant wins back. Speed is the best of 7 runs on a busy
+"loss recovered" columns are the share of plain int4's gap to int8 that the
+variant wins back, on bits/byte and on KL from English bf16 (`bench kl`). Speed is the best of 7 runs on a busy
 machine, so compare it within the column only.
 
-| int4 variant | size | bits/byte ↓ | loss recovered | top-1 | ARC acc / norm | HellaSwag acc / norm | tok/s |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| English int8 (reference) | 588 MB | 1.0771 | | 40.3% | 61.2 / 54.0 | 36.2 / 46.2 | 63 |
-| plain | 339 MB | 1.1393 | 0% | 38.6% | 57.2 / 52.8 | 33.8 / 37.5 | 79 |
-| AWQ | 339 MB | 1.1176 | 35% | 38.6% | 58.4 / 53.2 | 35.0 / 41.2 | 76 |
-| AWQ + rank 16 on `wo`, `w_out` | 341 MB | 1.1081 | 50% | 39.4% | | | 75 |
-| AWQ + int8 `wo`, `w_out` | 364 MB | 1.0892 | 81% | 40.0% | 58.0 / 55.2 | 35.0 / 40.0 | 76 |
-| AWQ + int8 `wo`, `w_out`, `w_down` | 408 MB | 1.0773 | ~100% | 40.6% | 59.2 / 55.2 | 35.0 / 41.2 | 72 |
-| AWQ + rank 16 on every large matrix | 359 MB | 1.1118 | 44% | 39.7% | | | |
-| AWQ + int8 `wo`, `w_out` + rank 16 on the rest | 382 MB | 1.0993 | 64% | 40.1% | | | |
+| int4 variant | size | bits/byte ↓ | loss recovered | KL ↓ | KL recovered | top-1 | ARC acc / norm | HellaSwag acc / norm | tok/s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| English int8 (reference) | 588 MB | 1.0771 | | 0.0006 | | 40.3% | 61.2 / 54.0 | 36.2 / 46.2 | 63 |
+| plain | 339 MB | 1.1393 | 0% | 0.1184 | 0% | 38.6% | 57.2 / 52.8 | 33.8 / 37.5 | 79 |
+| AWQ | 339 MB | 1.1176 | 35% | 0.1041 | 12% | 38.6% | 58.4 / 53.2 | 35.0 / 41.2 | 76 |
+| AWQ + rank 16 on `wo`, `w_out` | 341 MB | 1.1081 | 50% | 0.0927 | 22% | 39.4% | | | 75 |
+| AWQ + int8 `wo`, `w_out` | 364 MB | 1.0892 | 81% | 0.0617 | 48% | 40.0% | 58.0 / 55.2 | 35.0 / 40.0 | 76 |
+| AWQ + int8 `wo`, `w_out`, `w_down` | 408 MB | 1.0773 | ~100% | 0.0516 | 57% | 40.6% | 59.2 / 55.2 | 35.0 / 41.2 | 72 |
+| AWQ + rank 16 on every large matrix | 359 MB | 1.1118 | 44% | 0.0793 | 33% | 39.7% | | | |
+| AWQ + int8 `wo`, `w_out` + rank 16 on the rest | 382 MB | 1.0993 | 64% | 0.0512 | 57% | 40.1% | | | |
 
 The multiple-choice samples can't rank the int4 variants: all are within each
 other's error bars. The HellaSwag gap between int4 mixed and int8 (41 vs 46)
@@ -437,12 +504,16 @@ Interactive explainers, built with real numbers from this code:
 
 | file | what |
 |---|---|
-| `scripts/export.py` | Hugging Face safetensors → `model.bin` + `tokenizer.bin` (stdlib only) |
-| `scripts/shrink.py` | compression: vocabulary, int8/int4, AWQ, mixed precision, low-rank (numpy) |
-| `scripts/data.py` | downloads the English corpus and the benchmark sets (pyarrow) |
+| `python/kyse/cli.py` | the `kyse` command: presets, plans, caching, error messages |
+| `python/kyse/export.py` | Hugging Face safetensors → `model.bin` + `tokenizer.bin` (stdlib only) |
+| `python/kyse/shrink.py` | compression: vocabulary, int8/int4, AWQ, mixed precision, low-rank (numpy) |
+| `python/kyse/modelfile.py` | the `model.bin` header and tensor order |
+| `python/kyse/native.py` | runs and caches `bench count` / `bench calib` |
+| `python/kyse/formats.py` | compares candidate weight formats offline, by activation-weighted error |
+| `python/kyse/data.py` | downloads the English corpus and the benchmark sets (pyarrow) |
 | `scripts/benchmark.py` | runs the 9B smoke tests and saves the measurements |
 | `src/main.c` | `qwen`: command line, chat template, prompt + decode loop |
-| `src/bench.c` | `bench`: bpb, mc, calib, count |
+| `src/bench.c` | `bench`: bpb, mc, kl, calib, count |
 | `src/model.c` | loads `model.bin`, lays out the state, wires the forward pass |
 | `src/ops_ref.c` | reference C implementation of every op (the readable spec of the math) |
 | `src/backend.h` | compute backend interface and matrix formats |
@@ -457,8 +528,9 @@ Interactive explainers, built with real numbers from this code:
 export, vocabulary pruning, bf16/int8/int4, and mixed precision with AWQ and
 low-rank corrections. It then checks C inference, reset, snapshot/restore, and
 loading of older files. It also checks that AWQ's rescaling leaves a layer's
-output unchanged. `KYSE_TEST_METAL=1 make test` also compares Metal with the
-CPU reference.
+output unchanged, and drives the `kyse` command: presets, pattern checks,
+dry runs and error messages. `KYSE_TEST_METAL=1 make test` also compares
+Metal with the CPU reference.
 
 **File format:** `model.bin` is a small header followed by 64-byte-aligned
 tensors, memory-mapped at load time. Each version adds to the header:
@@ -467,7 +539,7 @@ tensors, memory-mapped at load time. Each version adds to the header:
 - v3: an untied output head;
 - v4: a format per matrix and optional low-rank corrections.
 
-`export.py` writes v3, `shrink.py` writes v4, and the loader reads v1–v4.
+`kyse export` writes v3, `kyse compress` writes v4, and the loader reads v1–v4.
 
 **Adding a backend:** `src/model.c` only wires ops together. Every op goes
 through the `Backend` vtable in `src/backend.h`: embed, matvec, rmsnorm, add,
@@ -498,6 +570,6 @@ swiglu, attention, deltanet and sync.
 The code is MIT (see `LICENSE`). The Qwen3.5 weights are Apache-2.0, from
 [Qwen/Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B) and
 [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B). The datasets that
-`scripts/data.py` downloads keep their own licenses: WikiText (CC BY-SA),
+`kyse data` downloads keep their own licenses: WikiText (CC BY-SA),
 Dolly-15k (CC BY-SA 3.0), TinyStories (CDLA-Sharing), ARC (CC BY-SA 4.0) and
 HellaSwag (MIT).

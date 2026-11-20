@@ -24,10 +24,10 @@ bench: src/bench.c $(SRC) $(HDR)
 # make export HF=path/to/hf/checkpoint
 HF ?= ../models/qwen3.5-0.8b
 export:
-	python3 scripts/export.py $(HF) .
+	uv run kyse export $(HF) .
 
 test:
-	python3 tests/test_model.py
+	uv run python -m unittest discover -s tests
 
 clean:
 	rm -f qwen bench

@@ -7,12 +7,10 @@ Download the English data used by shrink.py and bench, into <out_dir>:
   arc_easy.txt    ARC-Easy test, for `bench mc`
   hellaswag.txt   HellaSwag validation (shuffled, seed 0), for `bench mc`
 
-Multiple-choice prompts follow lm-evaluation-harness. Needs pyarrow (parquet).
-
-usage: python3 scripts/data.py <out_dir>
+Multiple-choice prompts follow lm-evaluation-harness. Needs pyarrow (parquet),
+the `data` extra of the package.
 """
-import io, json, os, random, re, sys, urllib.request
-import pyarrow.parquet as pq
+import io, json, os, random, re, urllib.request
 
 HF = "https://huggingface.co/"
 WIKITEXT = HF + "datasets/Salesforce/wikitext/resolve/main/wikitext-2-raw-v1/%s-00000-of-00001.parquet"
@@ -29,6 +27,7 @@ def fetch(url):
 
 
 def parquet(url):
+    import pyarrow.parquet as pq
     return pq.read_table(io.BytesIO(fetch(url))).to_pylist()
 
 
@@ -70,8 +69,8 @@ def hellaswag():
     return items
 
 
-def main():
-    out = sys.argv[1]
+def download(out):
+    """Writes the four files into the directory `out`."""
     os.makedirs(out, exist_ok=True)
 
     with open(os.path.join(out, "english.txt"), "w", encoding="utf-8") as f:
@@ -88,7 +87,3 @@ def main():
 
     write_mc(os.path.join(out, "arc_easy.txt"), arc_easy())
     write_mc(os.path.join(out, "hellaswag.txt"), hellaswag())
-
-
-if __name__ == "__main__":
-    main()
