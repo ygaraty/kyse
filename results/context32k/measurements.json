@@ -49,5 +49,8 @@
     "total_seconds": 3.0246869159745984,
     "stream_chunks": 3,
     "decode_chunks_per_second": 15.07233310636198
-  }
+  },
+  "kv_cache_dtype": "float32",
+  "runtime_commit": "2aaaa895869d54e00ba2d8c6c463be2e1f4ad8e4",
+  "historical_before_fp16_kv_merge": true
 }

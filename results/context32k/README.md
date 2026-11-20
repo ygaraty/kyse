@@ -3,6 +3,12 @@
 Measured on 2026-11-20, Apple M5, 24 GB unified memory, Metal backend,
 through the in-process CFFI engine. Context capacity: **32,768 tokens**.
 
+This recorded run predates the FP16 KV-cache merge and used **FP32**. The
+current runtime stores KV in FP16 (1 GiB at 32k instead of 2 GiB). The results
+below remain the original FP32 measurements; a full-window FP16 run has not
+been repeated as part of the merge. The Python server and binding have since
+moved to the sibling Piara project.
+
 ## Result
 
 **Passed:** the model returned `strawberry` exactly after a
@@ -63,15 +69,19 @@ From the repository root, with the compact model and `data/wiki.test.txt` availa
 
 ```sh
 make library bench
-server/.venv/bin/python scripts/benchmark_context.py \
+../piara/.venv/bin/python scripts/benchmark_context.py \
   --model en-9b-q8/model.bin --backend metal \
   --context 32768 --prompt-tokens 32736 --max-tokens 32
 ```
 
+The current script writes new runs to `results/context32k-fp16/` by default,
+keeping this historical FP32 run intact. Re-running the workload on current
+code measures FP16, not the earlier results above.
+
 Run the API with a long enough timeout:
 
 ```sh
-server/.venv/bin/python server/server.py \
+../piara/.venv/bin/python ../piara/server.py \
   --model en-9b-q8/model.bin --backend metal --context 32768 --timeout 7200
 ```
 

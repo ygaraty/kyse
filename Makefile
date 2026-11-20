@@ -48,8 +48,9 @@ test:
 	python3 tests/test_model.py
 
 SERVER_PYTHON ?= python3
+PIARA_DIR ?= ../piara
 test-server: qwen-worker library
-	$(SERVER_PYTHON) -m unittest discover -s server/tests -v
+	PYTHONPATH="$(abspath $(PIARA_DIR)/..)" KYSE_ROOT="$(CURDIR)" $(SERVER_PYTHON) -m unittest discover -s "$(PIARA_DIR)/tests" -v
 
 clean:
 	rm -f qwen bench qwen-worker $(LIBRARY)

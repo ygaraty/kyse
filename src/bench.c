@@ -14,6 +14,12 @@
 //       ending), as lm-evaluation-harness does. Item format: "label n" on a
 //       line, then the context and the n endings, each as "len\n<bytes>\n".
 //
+//   bench calib <model.bin> <text> <stats.bin> [-k chunks] [-l bytes] [-b backend] [-z tokenizer]
+//       Activation statistics for `shrink.py --awq`: the mean |x| of every
+//       input channel of every layer matrix, over -k chunks of about -l bytes
+//       spread evenly through the text. Writes, for each layer matrix in
+//       model.bin order: int32 cols, float mean_abs[cols].
+//
 //   bench count <tokenizer.bin> <text>...
 //       How often each token id occurs when the files are tokenized.
 //       Prints "id count" lines (non-zero only); shrink.py reads them.
@@ -214,6 +220,92 @@ static int mc(int argc, char **argv) {
     return 0;
 }
 
+// calib wraps the chosen backend: its matvec records the input before running it
+static Backend *calib_inner;
+static struct { const void *data; int cols; long n; double *abs; } stats[1024];
+static int n_stats;
+
+static void calib_matvec(float *out, Mat w, const float *x) {
+    for (int i = 0; i < n_stats; i++)
+        if (stats[i].data == w.data) {
+            calib_inner->sync();  // x is complete
+            for (int j = 0; j < w.cols; j++) stats[i].abs[j] += fabsf(x[j]);
+            stats[i].n++;
+            break;
+        }
+    calib_inner->matvec(out, w, x);
+}
+
+static void track(Mat w) {
+    if (n_stats == 1024) die("too many matrices");
+    stats[n_stats++] = (typeof(stats[0])){ w.data, w.cols, 0, calloc(w.cols, sizeof(double)) };
+}
+
+static int calib(int argc, char **argv) {
+    if (argc < 3) die("usage: bench calib <model.bin> <text> <stats.bin> [-k chunks] [-l bytes] [-b backend] [-z tokenizer]");
+    const char *model_path = argv[0];
+    Options o = parse_options(argc - 3, argv + 3, 32);
+    calib_inner = o.be;
+    Backend wrapper = *o.be;
+    wrapper.matvec = calib_matvec;
+    o.be = &wrapper;
+    size_t size;
+    char *text = read_file(argv[1], &size);
+    Model m;
+    Tokenizer tok;
+    int start = load(&m, &tok, model_path, &o, 2 * (int)o.chunk_bytes + 16);
+
+    // the layer matrices in the order map_weights() reads them
+    for (int l = 0; l < m.c.n_layers; l++) {
+        const Layer *L = &m.layers[l];
+        if (m.full_attn[l]) {
+            track(L->wq), track(L->wk), track(L->wv), track(L->wo);
+        } else {
+            track(L->w_qkv), track(L->w_z), track(L->w_a), track(L->w_b), track(L->w_out);
+        }
+        track(L->w_gate), track(L->w_up), track(L->w_down);
+    }
+
+    int *ids = malloc((size + 2) * sizeof(int));
+    long tokens = 0;
+    for (int c = 0; c < o.limit; c++) {
+        // chunk c starts at the first line after c/limit of the text
+        const char *p = text + size / o.limit * c, *nl = c ? strchr(p, '\n') : NULL;
+        size_t off = c ? (nl ? (size_t)(nl + 1 - text) : size) : 0;
+        size_t len = chunk_len(text + off, o.chunk_bytes);
+        char saved = text[off + len];
+        text[off + len] = '\0';
+        ids[0] = start;
+        int n = 1 + tokenizer_encode(&tok, text + off, ids + 1);
+        text[off + len] = saved;
+        if (n > m.seq_len) die("chunk does not fit the context");
+        model_reset(&m);
+        for (int i = 0; i < n; i++) model_forward(&m, ids[i], i, false);
+        tokens += n;
+        fprintf(stderr, "\rchunk %d/%d, %ld tokens", c + 1, o.limit, tokens);
+    }
+    m.be->sync();
+    fprintf(stderr, "\n");
+
+    FILE *f = fopen(argv[2], "wb");
+    if (!f) die("cannot write %s", argv[2]);
+    for (int i = 0; i < n_stats; i++) {
+        float *row = malloc(stats[i].cols * sizeof(float));
+        fwrite(&stats[i].cols, sizeof(int), 1, f);
+        for (int j = 0; j < stats[i].cols; j++) row[j] = stats[i].abs[j] / stats[i].n;
+        fwrite(row, sizeof(float), stats[i].cols, f);
+        free(row);
+        free(stats[i].abs);
+    }
+    fclose(f);
+    printf("wrote %s: %d matrices, %ld tokens\n", argv[2], n_stats, tokens);
+    free(ids);
+    free(text);
+    tokenizer_free(&tok);
+    model_free(&m);
+    return 0;
+}
+
 static int count(int argc, char **argv) {
     if (argc < 2) die("usage: bench count <tokenizer.bin> <text>...");
     Tokenizer tok;
@@ -252,6 +344,8 @@ static int count(int argc, char **argv) {
 int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "bpb") == 0) return bpb(argc - 2, argv + 2);
     if (argc >= 2 && strcmp(argv[1], "mc") == 0) return mc(argc - 2, argv + 2);
+    if (argc >= 2 && strcmp(argv[1], "calib") == 0) return calib(argc - 2, argv + 2);
     if (argc >= 2 && strcmp(argv[1], "count") == 0) return count(argc - 2, argv + 2);
-    die("usage: bench bpb|mc <model.bin> <file> [options] | bench count <tokenizer.bin> <text>...");
+    die("usage: bench bpb|mc <model.bin> <file> [options] | bench calib <model.bin> <text> <stats.bin> [options]"
+        " | bench count <tokenizer.bin> <text>...");
 }

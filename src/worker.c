@@ -1,4 +1,4 @@
-// Persistent inference worker for server/server.py. Stdout is a framed protocol:
+// Persistent inference worker for the companion Piara server. Stdout is a framed protocol:
 //   request: "generate <max_tokens> <temperature> <top_p> <seed> <bytes>\n" + prompt
 //   response: "token <id> <bytes>\n" + token bytes; caller replies "next\n" or "stop\n"
 //   terminal: "done <prompt_tokens> <output_tokens> <length:0|1>\n"

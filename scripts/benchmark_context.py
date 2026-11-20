@@ -13,19 +13,24 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from server.server import CFFIEngine, parse_request
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--piara-dir', type=Path, default=ROOT.parent/'piara', help='sibling Piara project')
     parser.add_argument('--model', type=Path, default=ROOT/'en-9b-q8/model.bin')
     parser.add_argument('--context', type=int, default=32768)
     parser.add_argument('--prompt-tokens', type=int, default=32736)
     parser.add_argument('--max-tokens', type=int, default=32)
     parser.add_argument('--backend', default='metal')
     parser.add_argument('--text', type=Path, default=ROOT/'data/wiki.test.txt')
-    parser.add_argument('--output', type=Path, default=ROOT/'results/context32k')
+    parser.add_argument('--output', type=Path, default=ROOT/'results/context32k-fp16')
     args = parser.parse_args()
+    sys.path.insert(0, str(args.piara_dir.resolve().parent))
+    try:
+        from piara.server import CFFIEngine, parse_request
+    except ModuleNotFoundError as error:
+        parser.error(f'Piara and its dependencies are required: {error}')
     if not 32 < args.prompt_tokens < args.context or args.max_tokens <= 0:
         parser.error('prompt-tokens must be between 33 and context-1; max-tokens must be positive')
     args.output.mkdir(parents=True, exist_ok=True)
@@ -64,7 +69,7 @@ def main():
     else:
         raise RuntimeError(f'Could not construct the requested token count: {n}')
     result = dict(context=args.context, requested_prompt_tokens=n, model=str(args.model.resolve()),
-                  backend=args.backend, expected_answer=key, prompt_sha256=hashlib.sha256(prompt_path.read_bytes()).hexdigest())
+                  backend=args.backend, kv_cache_dtype='float16', expected_answer=key, prompt_sha256=hashlib.sha256(prompt_path.read_bytes()).hexdigest())
 
     def save():
         (args.output/'measurements.json').write_text(json.dumps(result, indent=2)+'\n')

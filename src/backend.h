@@ -6,8 +6,8 @@
 // Contract:
 //   - Weights (matrices, f32 vectors) live inside the blob passed to init():
 //     the mmapped model file. Matrices come in one of the WeightType formats.
-//   - Activations and state (f32) live inside the memory returned by alloc(),
-//     which is called once. The CPU only touches it after sync().
+//   - Activations and state (f32, the KV cache f16) live inside the memory
+//     returned by alloc(), which is called once. The CPU only touches it after sync().
 //   - Ops may run asynchronously, but always in the order they are issued.
 //
 // To add a backend, implement matvec (the hot op) and reuse the reference
@@ -28,6 +28,10 @@
 //   WT_Q4    rows*cols/2 bytes, two weights per byte, low nibble first,
 //            each stored as q + 8 (q in -8..7)                  + scales
 // weight = q * scale
+//
+// A matrix may also carry a low-rank correction in bf16 (SVDQuant): W x is
+// then Q x + up (down x), with down [rank, cols] followed by up [rows, rank].
+// model.c applies it with two extra matvecs, so backends never see it.
 typedef enum { WT_BF16, WT_Q8, WT_Q4 } WeightType;
 #define QUANT_GROUP 32
 
@@ -35,6 +39,8 @@ typedef struct {
     const void *data;
     WeightType type;
     int rows, cols;
+    int rank;            // 0: no low-rank correction
+    const uint16_t *lr;  // down then up
 } Mat;
 
 static inline size_t mat_data_bytes(WeightType t, size_t rows, size_t cols) {
@@ -51,7 +57,7 @@ static inline const uint16_t *mat_scales(Mat m) {
 typedef struct {
     float *q;                      // [n_heads, 2*head_dim]: query | gate per head (q is clobbered)
     const float *k, *v;            // new key / value [n_kv_heads*head_dim], before norm and rope
-    float *k_cache, *v_cache;      // this layer's cache [seq_len, n_kv_heads*head_dim]
+    _Float16 *k_cache, *v_cache;   // this layer's cache [seq_len, n_kv_heads*head_dim]
     float *att;                    // scratch [n_heads, seq_len]
     const float *q_norm, *k_norm;  // [head_dim]
     float *out;                    // [n_heads*head_dim]

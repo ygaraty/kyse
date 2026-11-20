@@ -22,3 +22,6 @@ data/
 # generated long-context prompt and discarded calibration probe
 /results/context*/prompt.txt
 /results/context32k/initial-probe/
+
+# Finder metadata
+.DS_Store
