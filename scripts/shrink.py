@@ -12,7 +12,7 @@ Shrink a model.bin: keep only the tokens a corpus uses, and quantize the matrice
 
 Writes <out_dir>/model.bin and <out_dir>/tokenizer.bin. Needs numpy.
 
-usage: python shrink.py <model.bin> <tokenizer.bin> <counts.txt> <out_dir>
+usage: python3 scripts/shrink.py <model.bin> <tokenizer.bin> <counts.txt> <out_dir>
                         [--quant q8|q4|bf16] [--embed-quant q8|q4|bf16] [--min-count N]
 """
 import argparse, mmap, os, struct

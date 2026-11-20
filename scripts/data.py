@@ -9,7 +9,7 @@ Download the English data used by shrink.py and bench, into <out_dir>:
 
 Multiple-choice prompts follow lm-evaluation-harness. Needs pyarrow (parquet).
 
-usage: python data.py <out_dir>
+usage: python3 scripts/data.py <out_dir>
 """
 import io, json, os, random, re, sys, urllib.request
 import pyarrow.parquet as pq

@@ -10,18 +10,21 @@ ifeq ($(shell uname),Darwin)
   LDFLAGS += -framework Metal -framework Foundation -framework Accelerate
 endif
 
+SRC := $(addprefix src/,$(SRC))
+HDR := $(addprefix src/,$(HDR))
+
 all: qwen bench
 
-qwen: main.c $(SRC) $(HDR)
-	$(CC) $(CFLAGS) -o $@ main.c $(SRC) $(LDFLAGS) -lm
+qwen: src/main.c $(SRC) $(HDR)
+	$(CC) $(CFLAGS) -o $@ src/main.c $(SRC) $(LDFLAGS) -lm
 
-bench: bench.c $(SRC) $(HDR)
-	$(CC) $(CFLAGS) -o $@ bench.c $(SRC) $(LDFLAGS) -lm
+bench: src/bench.c $(SRC) $(HDR)
+	$(CC) $(CFLAGS) -o $@ src/bench.c $(SRC) $(LDFLAGS) -lm
 
 # make export HF=path/to/hf/checkpoint
 HF ?= ../models/qwen3.5-0.8b
 export:
-	python3 export.py $(HF) .
+	python3 scripts/export.py $(HF) .
 
 test:
 	python3 tests/test_model.py

@@ -6,7 +6,7 @@ Convert a Hugging Face Qwen3.5 checkpoint into two flat files the C code can mma
 
 Only uses the python standard library.
 
-usage: python export.py <hf_model_dir> <out_dir>
+usage: python3 scripts/export.py <hf_model_dir> <out_dir>
 """
 import json, os, struct, sys
 from contextlib import ExitStack

@@ -26,7 +26,7 @@ english int4         339 MB    12 ms/token      1.139       57.2%      37.5%
 
 ```
 hf download Qwen/Qwen3.5-0.8B --local-dir ../models/qwen3.5-0.8b
-python3 export.py ../models/qwen3.5-0.8b .   # -> model.bin, tokenizer.bin (stdlib only)
+python3 scripts/export.py ../models/qwen3.5-0.8b .   # -> model.bin, tokenizer.bin (stdlib only)
 make
 ./qwen model.bin                              # interactive chat (/reset, ctrl-d to quit)
 ./qwen model.bin -y "You are a pirate."      # chat with a system prompt
@@ -47,7 +47,7 @@ BF16 matrices without loading the whole checkpoint into Python memory.
 
 ```sh
 hf download Qwen/Qwen3.5-9B --revision c202236235762e1c871ad0ccb60c8ee5ba337b9a --local-dir models/qwen3.5-9b
-python3 export.py models/qwen3.5-9b models/9b
+python3 scripts/export.py models/qwen3.5-9b models/9b
 make
 ./qwen models/9b/model.bin -b metal             # interactive chat on macOS
 ./qwen models/9b/model.bin -b cpu -t 0 -i "Why is the sky blue?"
@@ -57,10 +57,10 @@ Apply the same English vocabulary pruning and quantization workflow:
 
 ```sh
 pip install numpy pyarrow                    # shrink.py and data.py
-python3 data.py data
+python3 scripts/data.py data
 ./bench count models/9b/tokenizer.bin data/english.txt > data/counts-9b.txt
-python3 shrink.py models/9b/model.bin models/9b/tokenizer.bin data/counts-9b.txt en-9b-q8 --quant q8
-python3 shrink.py models/9b/model.bin models/9b/tokenizer.bin data/counts-9b.txt en-9b-q4 --quant q4
+python3 scripts/shrink.py models/9b/model.bin models/9b/tokenizer.bin data/counts-9b.txt en-9b-q8 --quant q8
+python3 scripts/shrink.py models/9b/model.bin models/9b/tokenizer.bin data/counts-9b.txt en-9b-q4 --quant q4
 ./qwen en-9b-q8/model.bin -b metal              # recommended compact chat model
 ./qwen en-9b-q4/model.bin -b metal              # smaller, more aggressive option
 ```
@@ -139,13 +139,13 @@ together. The measurements in this section describe 0.8B.
 
 ```
 pip install pyarrow                                    # only for data.py
-python3 data.py data                                   # corpus + benchmark sets (~52 MB)
+python3 scripts/data.py data                                   # corpus + benchmark sets (~52 MB)
 ./bench count tokenizer.bin data/english.txt > data/counts.txt
-python3 shrink.py model.bin tokenizer.bin data/counts.txt en-q8 --quant q8   # needs numpy
+python3 scripts/shrink.py model.bin tokenizer.bin data/counts.txt en-q8 --quant q8   # needs numpy
 ./qwen en-q8/model.bin
 ```
 
-What `shrink.py` does:
+What `scripts/shrink.py` does:
 
 - **Vocabulary: 248,320 → 52,352 tokens.** It keeps the tokens that appear at
   least twice in 45 MB of English, plus:
@@ -169,7 +169,7 @@ What `shrink.py` does:
 
 ## Benchmarks: Qwen3.5-0.8B
 
-Apple M1 (16 GB), Metal backend. To reproduce, run `data.py` (above), then:
+Apple M1 (16 GB), Metal backend. To reproduce, run `scripts/data.py` (above), then:
 
 ```
 ./bench bpb model.bin data/wiki.test.txt -k 8        # bits per byte, 8 chunks of ~4 KB
@@ -235,21 +235,27 @@ token ─► embed (248,320 × 1024, tied with the LM head)
 
 ## Files
 
+C and Metal sources and headers live in `src/`; Python utilities live in
+`scripts/`. Build outputs remain `./qwen` and `./bench`, so chat and benchmark
+commands stay the same.
+
 | file | what |
 |---|---|
-| `main.c` | command line, chat template, prefill + decode loop |
-| `model.c` | loads `model.bin`, lays out the state, wires the forward pass |
-| `ops_ref.c` | reference C implementation of every op (the readable spec of the math) |
-| `backend.h` | compute backend interface, matrix formats |
-| `backend_cpu.c` | plain C backend (just the reference ops) |
-| `backend_accelerate.c` | Accelerate BLAS matvec + reference ops |
-| `backend_metal.m` + `kernels.metal` | Metal: every op is a kernel, one CPU wait per token |
-| `tokenizer.c` | byte-level BPE + hand-written version of Qwen's pre-tokenizer regex |
-| `sampler.c` | greedy / temperature + top-p |
-| `export.py` | HF safetensors → flat `model.bin` / `tokenizer.bin` (stdlib only) |
-| `shrink.py` | `model.bin` → English-only vocabulary + int8/int4 matrices (numpy) |
-| `bench.c` | `bpb`: bits per byte · `mc`: multiple choice · `count`: token counts for `shrink.py` |
-| `data.py` | downloads the corpus and the benchmark sets (pyarrow) |
+| `src/main.c` | command line, chat template, prefill + decode loop |
+| `src/model.c` | loads `model.bin`, lays out the state, wires the forward pass |
+| `src/ops_ref.c` | reference C implementation of every op (the readable spec of the math) |
+| `src/backend.h` | compute backend interface, matrix formats |
+| `src/backend_cpu.c` | plain C backend (just the reference ops) |
+| `src/backend_accelerate.c` | Accelerate BLAS matvec + reference ops |
+| `src/backend_metal.m` + `src/kernels.metal` | Metal: every op is a kernel, one CPU wait per token |
+| `src/tokenizer.c` | byte-level BPE + hand-written version of Qwen's pre-tokenizer regex |
+| `src/sampler.c` | greedy / temperature + top-p |
+| `scripts/export.py` | HF safetensors → flat `model.bin` / `tokenizer.bin` (stdlib only) |
+| `scripts/shrink.py` | `model.bin` → English-only vocabulary + int8/int4 matrices (numpy) |
+| `src/bench.c` | `bpb`: bits per byte · `mc`: multiple choice · `count`: token counts for `scripts/shrink.py` |
+| `scripts/data.py` | downloads the corpus and the benchmark sets (pyarrow) |
+| `scripts/benchmark.py` | runs generation and quality smoke tests and saves measurements |
+| `tests/` | synthetic checkpoint tests and CPU/Metal parity checks |
 
 ## Interactive explainers
 
@@ -262,21 +268,21 @@ Built while writing this, with real numbers from this code:
 
 ## Adding a backend
 
-`model.c` only wires ops together; every op goes through the `Backend` vtable in
-`backend.h` (embed, matvec, rmsnorm, add, swiglu, attention, deltanet, sync).
+`src/model.c` only wires ops together; every op goes through the `Backend` vtable in
+`src/backend.h` (embed, matvec, rmsnorm, add, swiglu, attention, deltanet, sync).
 Ops may be async; the CPU only reads memory (the logits) after `sync()`.
 Matrices arrive as a `Mat` (data, format, shape); a backend that only handles
 bf16 can fall back to `ref_matvec` for the quantized formats.
 
 The quickest start is to implement `matvec` only and reuse the `ref_*` ops for
-the rest (see `backend_accelerate.c`). Move the other ops over when you want to
+the rest (see `src/backend_accelerate.c`). Move the other ops over when you want to
 remove CPU round trips. Add an `extern Backend backend_xxx;` and list it in
-`backends[]` in `backend.h`.
+`backends[]` in `src/backend.h`.
 
 ## Notes / simplifications
 
 - One token at a time, prompt included (no batched prefill).
-- Weights are bf16 (or int8/int4 after `shrink.py`); activations and state are f32.
+- Weights are bf16 (or int8/int4 after `scripts/shrink.py`); activations and state are f32.
 - The pre-tokenizer treats every non-ASCII byte as a letter. It's exact for ASCII
   and very close for everything else. There's no NFC normalization.
 - The chat template is hard-coded to non-thinking mode; `-r` gives raw completion.
@@ -291,5 +297,5 @@ remove CPU round trips. Add an `extern Backend backend_xxx;` and list it in
 The code is MIT (see `LICENSE`). The Qwen3.5 weights are Apache-2.0, from
 [Qwen/Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B) and
 [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B). The datasets
-`data.py` downloads keep their own licenses: WikiText (CC BY-SA), Dolly-15k
+`scripts/data.py` downloads keep their own licenses: WikiText (CC BY-SA), Dolly-15k
 (CC BY-SA 3.0), TinyStories (CDLA-Sharing), ARC (CC BY-SA 4.0) and HellaSwag (MIT).

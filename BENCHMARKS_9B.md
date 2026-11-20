@@ -41,14 +41,14 @@ Artifacts:
 
 ## Reproduce
 
-From the repository directory, after downloading the checkpoint and running `data.py`:
+From the repository directory, after downloading the checkpoint and running `scripts/data.py`:
 
 ```sh
 make
-python3 export.py models/qwen3.5-9b models/9b
+python3 scripts/export.py models/qwen3.5-9b models/9b
 ./bench count models/9b/tokenizer.bin data/english.txt > data/counts-9b.txt
-python3 shrink.py models/9b/model.bin models/9b/tokenizer.bin data/counts-9b.txt en-9b-q8 --quant q8
-python3 shrink.py models/9b/model.bin models/9b/tokenizer.bin data/counts-9b.txt en-9b-q4 --quant q4
+python3 scripts/shrink.py models/9b/model.bin models/9b/tokenizer.bin data/counts-9b.txt en-9b-q8 --quant q8
+python3 scripts/shrink.py models/9b/model.bin models/9b/tokenizer.bin data/counts-9b.txt en-9b-q4 --quant q4
 python3 scripts/benchmark.py models/9b en-9b-q8 en-9b-q4 --hellaswag-items 7
 ./qwen en-9b-q8/model.bin -b metal -i "Explain how a rainbow forms."
 ```

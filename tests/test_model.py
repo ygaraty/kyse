@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('export', ROOT / 'export.py')
+spec = importlib.util.spec_from_file_location('export', ROOT / 'scripts/export.py')
 export = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(export)
 
@@ -81,11 +81,11 @@ class ModelTest(unittest.TestCase):
         cls.runner = Path(cls.temp.name) / 'runner'
         extra = []
         if os.environ.get('KYSE_TEST_METAL'):
-            extra = ['-DKYSE_TEST_METAL', str(ROOT/'backend_accelerate.c'), str(ROOT/'backend_metal.m'), '-fobjc-arc',
+            extra = ['-DKYSE_TEST_METAL', str(ROOT/'src/backend_accelerate.c'), str(ROOT/'src/backend_metal.m'), '-fobjc-arc',
                      '-framework', 'Metal', '-framework', 'Foundation', '-framework', 'Accelerate']
         subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu23', '-Wall', '-Wextra',
-                        '-I', str(ROOT), str(ROOT/'tests/model_test.c'), str(ROOT/'model.c'),
-                        str(ROOT/'ops_ref.c'), str(ROOT/'backend_cpu.c'), '-lm', '-o', str(cls.runner)] + extra, check=True)
+                        '-I', str(ROOT/'src'), str(ROOT/'tests/model_test.c'), str(ROOT/'src/model.c'),
+                        str(ROOT/'src/ops_ref.c'), str(ROOT/'src/backend_cpu.c'), '-lm', '-o', str(cls.runner)] + extra, check=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -118,5 +118,5 @@ class ModelTest(unittest.TestCase):
 
 if __name__ == '__main__':
     import sys
-    sys.path.insert(0, str(ROOT))
+    sys.path.insert(0, str(ROOT/'scripts'))
     unittest.main()
