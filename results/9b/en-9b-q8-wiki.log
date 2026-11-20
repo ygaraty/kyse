@@ -1,0 +1,3 @@
+metal: Apple M5
+chunk 1/2: 0.7476 bits/byte so farchunk 2/2: 0.8297 bits/byte so far
+/Users/felipecruz/Projects/personal/kyse/en-9b-q8/model.bin: 0.8297 bits/byte | 3.405 bits/token | top-1 53.4% | 834 tokens for 3423 bytes (4.10 bytes/token) | 68.6 ms/token [metal]

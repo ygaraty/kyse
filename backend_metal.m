@@ -1,7 +1,7 @@
 // Apple Metal backend.
 //
-// Unified memory means no copies: the mmapped model file is wrapped as one
-// MTLBuffer and all activations/state live in another (the arena), so the
+// Unified memory means no copies: page-aligned views wrap the mmapped weights
+// and all activations/state live in another buffer (the arena), so the
 // pointers model.c passes around just become (buffer, offset) pairs.
 //
 // Every op appends a dispatch to the current command buffer. The CPU only
@@ -9,6 +9,7 @@
 #import <Metal/Metal.h>
 #include "backend.h"
 #include "util.h"
+#include <unistd.h>
 
 static const char kernel_source[] = {
 #embed "kernels.metal"
@@ -20,7 +21,10 @@ static const char kernel_source[] = {
 
 static id<MTLDevice> device;
 static id<MTLCommandQueue> queue;
-static id<MTLBuffer> weights_buf, arena_buf;
+static id<MTLBuffer> arena_buf;
+static NSMutableDictionary<NSString *, id<MTLBuffer>> *weight_views;
+static char *weight_base;
+static size_t weight_size;
 static id<MTLCommandBuffer> cmd, last_cmd;
 static id<MTLComputeCommandEncoder> enc;
 static int n_dispatches;
@@ -61,9 +65,11 @@ static int metal_init(void *weights, size_t size) {
     k.delta_conv = make_pipeline(lib, "delta_conv");
     k.delta_step = make_pipeline(lib, "delta_step");
 
-    weights_buf = [device newBufferWithBytesNoCopy:weights length:size
-                                           options:MTLResourceStorageModeShared deallocator:nil];
-    if (!weights_buf) die("metal: cannot wrap the %zu byte weight file", size);
+    // A 9B checkpoint exceeds maxBufferLength. Cache page-aligned views of
+    // the mmap on demand; individual tensors must still fit in one buffer.
+    weight_base = weights;
+    weight_size = size;
+    weight_views = [NSMutableDictionary dictionary];
     fprintf(stderr, "metal: %s\n", device.name.UTF8String);
     return 0;
 }
@@ -99,12 +105,30 @@ static void begin(id<MTLComputePipelineState> pipeline) {
     [enc setComputePipelineState:pipeline];
 }
 
-// binds a pointer that lives in the weights or in the arena
+// Weight views cover only the tensor being bound, rounded to VM pages.
+// Mapping every suffix of a large checkpoint would greatly overcount residency.
+static void bind_weight(const void *ptr, int index, size_t bytes) {
+    size_t page = (size_t)getpagesize();
+    size_t offset = (const char *)ptr - weight_base;
+    size_t start = offset / page * page;
+    size_t length = (offset - start + bytes + page - 1) / page * page;
+    if (offset >= weight_size || bytes > weight_size - offset || length > device.maxBufferLength)
+        die("metal: weight tensor exceeds mapping or device buffer limit");
+    NSString *key = [NSString stringWithFormat:@"%zu:%zu", start, length];
+    id<MTLBuffer> view = weight_views[key];
+    if (!view) {
+        view = [device newBufferWithBytesNoCopy:weight_base + start length:length
+                        options:MTLResourceStorageModeShared deallocator:nil];
+        if (!view) die("metal: cannot wrap weight view at %zu", start);
+        weight_views[key] = view;
+    }
+    [enc setBuffer:view offset:offset - start atIndex:index];
+}
+
 static void bind(const void *ptr, int index) {
-    const char *p = ptr, *w = weights_buf.contents, *a = arena_buf.contents;
-    if (p >= w && p < w + weights_buf.length) [enc setBuffer:weights_buf offset:p - w atIndex:index];
-    else if (p >= a && p < a + arena_buf.length) [enc setBuffer:arena_buf offset:p - a atIndex:index];
-    else die("metal: pointer %p is not in a backend buffer", ptr);
+    uintptr_t p = (uintptr_t)ptr, a = (uintptr_t)arena_buf.contents;
+    if (p < a || p - a >= arena_buf.length) die("metal: pointer %p is not in arena", ptr);
+    [enc setBuffer:arena_buf offset:p - a atIndex:index];
 }
 
 static void bind_bytes(const void *data, size_t size, int index) {
@@ -126,12 +150,13 @@ static void run_groups(int n_groups, int threads_per_group) {
 
 // quantized matrices bind their scales at index 5 (bf16 ones bind the data as a dummy)
 static void bind_scales(Mat m, int index) {
-    bind(m.type == WT_BF16 ? m.data : mat_scales(m), index);
+    if (m.type == WT_BF16) bind_weight(m.data, index, mat_data_bytes(m.type, m.rows, m.cols));
+    else bind_weight(mat_scales(m), index, (size_t)m.rows * m.cols / QUANT_GROUP * sizeof(uint16_t));
 }
 
 static void metal_embed(float *out, Mat table, int token) {
     begin(k.embed);
-    bind(table.data, 0);
+    bind_weight(table.data, 0, mat_data_bytes(table.type, table.rows, table.cols));
     bind(out, 1);
     bind_bytes(&token, sizeof(int), 2);
     bind_bytes(&table.cols, sizeof(int), 3);
@@ -141,9 +166,11 @@ static void metal_embed(float *out, Mat table, int token) {
 }
 
 static void metal_matvec(float *out, Mat w, const float *x) {
+    if (mat_bytes(w.type, w.rows, w.cols) + (size_t)getpagesize() > device.maxBufferLength)
+        die("metal: matrix exceeds device buffer limit; use -b cpu");
     if (w.cols % 4 || (w.type != WT_BF16 && w.cols % 16)) die("metal matvec: unsupported column count %d", w.cols);
     begin(k.matvec[w.type]);
-    bind(w.data, 0);
+    bind_weight(w.data, 0, mat_data_bytes(w.type, w.rows, w.cols));
     bind(x, 1);
     bind(out, 2);
     bind_bytes(&w.cols, sizeof(int), 3);
@@ -155,7 +182,7 @@ static void metal_matvec(float *out, Mat w, const float *x) {
 static void metal_rmsnorm(float *out, const float *x, const float *w, int n, float eps) {
     begin(k.rmsnorm);
     bind(x, 0);
-    bind(w, 1);
+    bind_weight(w, 1, (size_t)n * sizeof(float));
     bind(out, 2);
     bind_bytes(&n, sizeof(int), 3);
     bind_bytes(&eps, sizeof(float), 4);
@@ -190,8 +217,8 @@ static void bind_attention(const AttnArgs *a) {
     bind(a->k_cache, 3);
     bind(a->v_cache, 4);
     bind(a->att, 5);
-    bind(a->q_norm, 6);
-    bind(a->k_norm, 7);
+    bind_weight(a->q_norm, 6, (size_t)(a->head_dim) * sizeof(float));
+    bind_weight(a->k_norm, 7, (size_t)(a->head_dim) * sizeof(float));
     bind(a->out, 8);
     bind_bytes(&params, sizeof(params), 9);
 }
@@ -216,10 +243,10 @@ static void bind_deltanet(const DeltaArgs *a) {
     bind(a->b, 3);
     bind(a->conv_state, 4);
     bind(a->ssm_state, 5);
-    bind(a->conv_w, 6);
-    bind(a->A_log, 7);
-    bind(a->dt_bias, 8);
-    bind(a->norm, 9);
+    bind_weight(a->conv_w, 6, (size_t)((2 * a->nk * a->dk + a->nv * a->dv) * a->conv_k) * sizeof(float));
+    bind_weight(a->A_log, 7, (size_t)(a->nv) * sizeof(float));
+    bind_weight(a->dt_bias, 8, (size_t)(a->nv) * sizeof(float));
+    bind_weight(a->norm, 9, (size_t)(a->dv) * sizeof(float));
     bind(a->out, 10);
     bind_bytes(&params, sizeof(params), 11);
 }
@@ -238,13 +265,17 @@ static void metal_deltanet(const DeltaArgs *a) {
 static void metal_sync(void) {
     flush();
     [last_cmd waitUntilCompleted];
+    if (last_cmd && last_cmd.status == MTLCommandBufferStatusError)
+        die("metal: command failed: %s", last_cmd.error.localizedDescription.UTF8String);
     last_cmd = nil;
 }
 
 static void metal_shutdown(void) {
     metal_sync();
     arena_buf = nil;
-    weights_buf = nil;
+    weight_views = nil;
+    weight_base = NULL;
+    weight_size = 0;
     queue = nil;
     device = nil;
 }

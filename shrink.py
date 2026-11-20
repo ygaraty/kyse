@@ -5,8 +5,7 @@ Shrink a model.bin: keep only the tokens a corpus uses, and quantize the matrice
      kept (counts come from `./bench count tokenizer.bin corpus.txt`), plus the
      256 single bytes (so any text can still be encoded), the special tokens,
      the words of the chat template in main.c, and every token the BPE builds on the way to a kept token (so text made of
-     kept tokens is tokenized exactly as before). The embedding table, which is
-     also the LM head, keeps only those rows.
+     kept tokens is tokenized exactly as before). Both the embedding table and the LM head keep only those rows.
   2. Quantization. Every matrix is stored as int8 or int4 with one f16 scale per
      group of 32 weights (see WeightType in backend.h). For int4 the scale of
      each group is picked from a few candidates to minimize the squared error.
@@ -16,7 +15,7 @@ Writes <out_dir>/model.bin and <out_dir>/tokenizer.bin. Needs numpy.
 usage: python shrink.py <model.bin> <tokenizer.bin> <counts.txt> <out_dir>
                         [--quant q8|q4|bf16] [--embed-quant q8|q4|bf16] [--min-count N]
 """
-import argparse, os, struct
+import argparse, mmap, os, struct
 import numpy as np
 
 ALIGN = 64  # must match export.py / model.c
@@ -134,7 +133,9 @@ class Reader:
 
     def take(self, nbytes):
         self.off += -self.off % ALIGN
-        b = self.data[self.off:self.off + nbytes]
+        if self.off + nbytes > len(self.data):
+            raise ValueError("model file is truncated")
+        b = memoryview(self.data)[self.off:self.off + nbytes]
         self.off += nbytes
         return b
 
@@ -147,9 +148,12 @@ class Reader:
 
 
 def shrink_model(src, dst, keep, quant, embed_quant):
-    data = memoryview(open(src, "rb").read())
+    source = open(src, "rb")
+    data = mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ)
     assert bytes(data[:4]) == b"QW35", "not a model.bin"
     version = struct.unpack_from("<i", data, 4)[0]
+    if version not in (1, 2, 3):
+        raise ValueError("unsupported model version")
     ints = list(struct.unpack_from("<13i", data, 8))
     floats = struct.unpack_from("<2f", data, 8 + 52)
     D, F, L, V, nh, nkv, hd, _, lk, lv, dk, dv, K = ints
@@ -158,6 +162,9 @@ def shrink_model(src, dst, keep, quant, embed_quant):
     if version >= 2:
         assert struct.unpack_from("<ii", data, off) == (0, 0), "input must be a bf16 model.bin"
         off += 8
+    untied = version >= 3 and struct.unpack_from("<i", data, off)[0]
+    if version >= 3:
+        off += 4
     r = Reader(data, off)
     key_dim, val_dim = lk * dk, lv * dv
     conv_dim = 2 * key_dim + val_dim
@@ -176,15 +183,23 @@ def shrink_model(src, dst, keep, quant, embed_quant):
         out.write(r.vec(n))
 
     ints[3] = len(keep)
-    out.write(b"QW35" + struct.pack("<i", 2))
+    out.write(b"QW35" + struct.pack("<i", 3))
     out.write(struct.pack("<13i", *ints) + struct.pack("<2f", *floats))
     out.write(struct.pack("<%di" % L, *layer_types))
     out.write(struct.pack("<ii", TYPES[quant], TYPES[embed_quant]))
 
+    out.write(struct.pack("<i", int(bool(untied))))
+
     # same order as export.py / map_weights() in model.c
-    embed = r.mat(V, D)[keep]
-    pad()
-    out.write(quantize_rows(embed, embed_quant))
+    def table():
+        # Select bf16 rows before expanding: the full 9B table is ~4 GB in f32.
+        raw = np.frombuffer(r.take(V * D * 2), dtype="<u2").reshape(V, D)
+        selected = raw[keep]
+        weights = (selected.astype(np.uint32) << 16).view(np.float32)
+        pad()
+        out.write(quantize_rows(weights, embed_quant))
+
+    table()
     for l in range(L):
         vec(D)
         vec(D)
@@ -210,9 +225,15 @@ def shrink_model(src, dst, keep, quant, embed_quant):
         mat(D, F)
         print("\rlayer %d/%d" % (l + 1, L), end="", flush=True)
     vec(D)
+    if untied:
+        table()
     pad()
+    size = out.tell()
+    out.close()
+    data.close()
+    source.close()
     print()
-    return out.tell()
+    return size
 
 
 def main():

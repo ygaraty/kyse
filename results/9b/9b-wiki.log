@@ -1,0 +1,5 @@
+metal: Apple M5
+
+chunk 1/2: 0.7393 bits/byte so far
+chunk 2/2: 0.8260 bits/byte so far
+/Users/felipecruz/Projects/personal/kyse/models/9b/model.bin: 0.8260 bits/byte | 3.398 bits/token | top-1 53.1% | 832 tokens for 3423 bytes (4.11 bytes/token) | 181.1 ms/token [metal]

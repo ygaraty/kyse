@@ -1,0 +1,13 @@
+metal: Apple M5
+
+item 1: acc 100.0% acc_norm 100.0%
+item 2: acc 50.0% acc_norm 50.0%
+item 3: acc 33.3% acc_norm 33.3%
+item 4: acc 50.0% acc_norm 50.0%
+item 5: acc 40.0% acc_norm 40.0%
+item 6: acc 50.0% acc_norm 33.3%
+item 7: acc 57.1% acc_norm 28.6%
+item 8: acc 62.5% acc_norm 25.0%
+item 9: acc 66.7% acc_norm 33.3%
+item 10: acc 70.0% acc_norm 40.0%
+/Users/felipecruz/Projects/personal/kyse/models/9b/model.bin on /Users/felipecruz/Projects/personal/kyse/data/arc_easy.txt: acc 70.0% (±14.5) | acc_norm 40.0% (±15.5) | 10 items | 213.5s [metal]

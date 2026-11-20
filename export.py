@@ -9,6 +9,7 @@ Only uses the python standard library.
 usage: python export.py <hf_model_dir> <out_dir>
 """
 import json, os, struct, sys
+from contextlib import ExitStack
 
 ALIGN = 64  # every tensor starts on a 64-byte boundary (nice for GPU loads)
 
@@ -40,16 +41,39 @@ def read_bf16(f, base, info):
 
 
 def export_model(hf_dir, out_path):
-    cfg = json.load(open(os.path.join(hf_dir, "config.json")))["text_config"]
-    st = [p for p in os.listdir(hf_dir) if p.endswith(".safetensors")]
-    assert len(st) == 1, "expected a single safetensors file"
-    f, base, h = load_safetensors(os.path.join(hf_dir, st[0]))
+    with ExitStack() as stack:
+        _export_model(hf_dir, out_path, stack)
+
+
+def _export_model(hf_dir, out_path, stack):
+    with open(os.path.join(hf_dir, "config.json")) as config_file:
+        root = json.load(config_file)
+    cfg = root["text_config"]
+    # Keep shard handles open, but stream matrix payloads instead of loading them.
+    index_path = os.path.join(hf_dir, "model.safetensors.index.json")
+    if os.path.exists(index_path):
+        with open(index_path) as index:
+            shards = sorted(set(json.load(index)["weight_map"].values()))
+    else:
+        shards = sorted(p for p in os.listdir(hf_dir) if p.endswith(".safetensors"))
+    if not shards:
+        raise ValueError("no safetensors checkpoint found")
+    tensors = {}
+    for shard in shards:
+        f, base, header = load_safetensors(os.path.join(hf_dir, shard))
+        stack.enter_context(f)
+        for name, info in header.items():
+            if name in tensors:
+                raise ValueError("duplicate tensor: " + name)
+            tensors[name] = (f, base, info)
+    tied = cfg.get("tie_word_embeddings",
+                   root.get("tie_word_embeddings", False))
 
     L = cfg["num_hidden_layers"]
     layer_types = [1 if t == "full_attention" else 0 for t in cfg["layer_types"]]
     rot_dim = int(cfg["head_dim"] * cfg["rope_parameters"]["partial_rotary_factor"])
 
-    out = open(out_path, "wb")
+    out = stack.enter_context(open(out_path, "wb"))
 
     def pad():
         out.write(b"\0" * ((-out.tell()) % ALIGN))
@@ -64,55 +88,69 @@ def export_model(hf_dir, out_path):
     ]
     floats = [cfg["rms_norm_eps"], cfg["rope_parameters"]["rope_theta"]]
     out.write(b"QW35")
-    out.write(struct.pack("<i", 2))
+    out.write(struct.pack("<i", 3))
     out.write(struct.pack("<%di" % len(ints), *ints))
     out.write(struct.pack("<%df" % len(floats), *floats))
     out.write(struct.pack("<%di" % L, *layer_types))
-    out.write(struct.pack("<ii", 0, 0))
+    out.write(struct.pack("<iii", 0, 0, int(not tied)))
     pad()
 
     p = "model.language_model."
 
-    def mat(name):  # bf16 matrix for the matvec backend
+    def mat(name):  # stream bf16 matrices in bounded chunks, including the 9B tables
         pad()
-        out.write(read_bf16(f, base, h[p + name]))
+        f, base, info = tensors[name]
+        if info["dtype"] != "BF16":
+            raise ValueError("expected BF16 matrix: " + name)
+        a, b = info["data_offsets"]
+        f.seek(base + a)
+        remaining = b - a
+        while remaining:
+            chunk = f.read(min(remaining, 8 * 1024 * 1024))
+            if not chunk:
+                raise ValueError("truncated tensor: " + name)
+            out.write(chunk)
+            remaining -= len(chunk)
 
     def vec(name, plus_one=False):  # small f32 tensor used on the CPU
         pad()
-        x = read_f32(f, base, h[p + name])
+        f, base, info = tensors[p + name]
+        x = read_f32(f, base, info)
         if plus_one:  # Qwen3.5 RMSNorm computes x * (1 + w); bake the +1 in here
             x = [v + 1.0 for v in x]
         out.write(struct.pack("<%df" % len(x), *x))
 
     # order must match the C loader exactly
-    mat("embed_tokens.weight")
+    mat(p + "embed_tokens.weight")
     for i in range(L):
         q = "layers.%d." % i
         vec(q + "input_layernorm.weight", plus_one=True)
         vec(q + "post_attention_layernorm.weight", plus_one=True)
         if layer_types[i]:
             a = q + "self_attn."
-            mat(a + "q_proj.weight")
-            mat(a + "k_proj.weight")
-            mat(a + "v_proj.weight")
-            mat(a + "o_proj.weight")
+            mat(p + a + "q_proj.weight")
+            mat(p + a + "k_proj.weight")
+            mat(p + a + "v_proj.weight")
+            mat(p + a + "o_proj.weight")
             vec(a + "q_norm.weight", plus_one=True)
             vec(a + "k_norm.weight", plus_one=True)
         else:
             a = q + "linear_attn."
-            mat(a + "in_proj_qkv.weight")
-            mat(a + "in_proj_z.weight")
-            mat(a + "in_proj_a.weight")
-            mat(a + "in_proj_b.weight")
-            mat(a + "out_proj.weight")
+            mat(p + a + "in_proj_qkv.weight")
+            mat(p + a + "in_proj_z.weight")
+            mat(p + a + "in_proj_a.weight")
+            mat(p + a + "in_proj_b.weight")
+            mat(p + a + "out_proj.weight")
             vec(a + "conv1d.weight")
             vec(a + "A_log")
             vec(a + "dt_bias")
             vec(a + "norm.weight")  # gated norm: plain x * w, no +1
-        mat(q + "mlp.gate_proj.weight")
-        mat(q + "mlp.up_proj.weight")
-        mat(q + "mlp.down_proj.weight")
+        mat(p + q + "mlp.gate_proj.weight")
+        mat(p + q + "mlp.up_proj.weight")
+        mat(p + q + "mlp.down_proj.weight")
     vec("norm.weight", plus_one=True)
+    if not tied:
+        mat("lm_head.weight")
     pad()
     print("wrote %s (%.1f MB)" % (out_path, out.tell() / 1e6))
 

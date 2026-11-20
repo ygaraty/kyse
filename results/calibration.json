@@ -1,0 +1,20 @@
+{
+  "revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+  "original_vocab": 248320,
+  "kept_vocab": 52352,
+  "min_count": 2,
+  "corpus_bytes": 44858696,
+  "wiki_test_tokens_original": 297053,
+  "wiki_test_tokens_compact": 298584,
+  "hardware": {
+    "chip": "Apple M5",
+    "memory_gb": 24
+  },
+  "dataset_sha256": {
+    "english.txt": "51ed2d933baeba662aff88f8d7afeb882b7d33bd589462dc888182574e8ff449",
+    "wiki.test.txt": "bbf94c53a05abe9ee670d3b6343608095822c85e26de37c70b24fc571964574a",
+    "arc_easy.txt": "23cef9378f56de693396d9c5c3b2f46e560ea498560dd3334a6602a76dc14d17",
+    "hellaswag.txt": "3c4b9c6136b7efc79e354466c02b9b5d93f0b173baa8a25af624261c12bea27d",
+    "counts-9b.txt": "a7ec4749dcd0331bf5b251ed6762fb85fd00c881678e9bc5fb9235dd25aa66be"
+  }
+}

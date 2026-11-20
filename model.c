@@ -7,7 +7,7 @@
 #include "util.h"
 
 #define FILE_MAGIC   "QW35"
-#define FILE_VERSION 2  // 1: all bf16; 2: adds the matrix and embedding formats
+#define FILE_VERSION 3  // 2: matrix formats; 3: optional untied output head
 #define TENSOR_ALIGN 64  // bytes, must match export.py
 
 static int max_i(int a, int b) { return a > b ? a : b; }
@@ -26,10 +26,11 @@ static int count_full_layers(const Model *m) {
 // loading
 
 // walks the tensors of model.bin in the order export.py wrote them
-typedef struct { char *base; size_t off; WeightType type; } Reader;
+typedef struct { char *base; size_t off, size; WeightType type; } Reader;
 
 static void *next(Reader *r, size_t bytes) {
     r->off = (r->off + TENSOR_ALIGN - 1) & ~(size_t)(TENSOR_ALIGN - 1);
+    if (r->off > r->size || bytes > r->size - r->off) die("model file is truncated");
     void *p = r->base + r->off;
     r->off += bytes;
     return p;
@@ -40,10 +41,10 @@ static Mat mat(Reader *r, int rows, int cols) {
 }
 static const float *vec(Reader *r, int n) { return next(r, (size_t)n * sizeof(float)); }
 
-static void map_weights(Model *m, const char *start, WeightType embed_type) {
+static void map_weights(Model *m, const char *start, WeightType embed_type, bool untied) {
     const Config *c = &m->c;
     int D = c->dim, F = c->hidden_dim, hd = c->head_dim, nv = c->lin_v_heads;
-    Reader r = { m->file, start - (char *)m->file, embed_type };
+    Reader r = { m->file, start - (char *)m->file, m->data_size, embed_type };
 
     m->embed = mat(&r, c->vocab_size, D);
     r.type = m->mat_type;
@@ -75,6 +76,8 @@ static void map_weights(Model *m, const char *start, WeightType embed_type) {
         L->w_down = mat(&r, D, F);
     }
     m->final_norm = vec(&r, D);
+    r.type = embed_type;
+    m->head = untied ? mat(&r, c->vocab_size, D) : m->embed;
     if (r.off > m->file_size) die("model file is truncated");
 }
 
@@ -112,7 +115,8 @@ void model_load(Model *m, const char *path, Backend *be, int seq_len) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) die("cannot open %s", path);
     struct stat st;
-    fstat(fd, &st);
+    if (fstat(fd, &st) != 0 || st.st_size < 68) die("invalid model file: %s", path);
+    m->data_size = (size_t)st.st_size;
     size_t page = (size_t)getpagesize();
     m->file_size = ((size_t)st.st_size + page - 1) / page * page;  // page-rounded so a GPU can wrap it
     m->file = mmap(NULL, m->file_size, PROT_READ, MAP_PRIVATE, fd, 0);
@@ -126,12 +130,30 @@ void model_load(Model *m, const char *path, Backend *be, int seq_len) {
     if (memcmp(p, FILE_MAGIC, 4) != 0 || version < 1 || version > FILE_VERSION)
         die("%s is not a model.bin from export.py", path);
     memcpy(&m->c, p + 8, sizeof(Config));
+    const Config *c = &m->c;
+    if (seq_len <= 0 || c->dim <= 0 || c->hidden_dim <= 0 || c->vocab_size <= 0 ||
+        c->n_layers <= 0 || c->n_heads <= 0 || c->n_kv_heads <= 0 || c->head_dim <= 0 ||
+        c->lin_k_heads <= 0 || c->lin_v_heads <= 0 || c->lin_k_dim <= 0 ||
+        c->lin_v_dim <= 0 || c->conv_k < 2 || c->n_heads % c->n_kv_heads ||
+        c->lin_v_heads % c->lin_k_heads || c->rot_dim < 0 ||
+        c->rot_dim > c->head_dim || c->rot_dim % 2)
+        die("invalid model configuration");
+    size_t header_size = 68 + (size_t)c->n_layers * 4 + (version >= 3 ? 12 : version >= 2 ? 8 : 0);
+    if (header_size > m->data_size) die("model header is truncated");
     m->full_attn = (const int32_t *)(p + 8 + sizeof(Config));
+    for (int l = 0; l < c->n_layers; l++)
+        if (m->full_attn[l] != 0 && m->full_attn[l] != 1) die("invalid layer type");
     const int32_t *types = m->full_attn + m->c.n_layers;
     m->mat_type = version >= 2 ? types[0] : WT_BF16;
     WeightType embed_type = version >= 2 ? types[1] : WT_BF16;
+    if (m->mat_type < WT_BF16 || m->mat_type > WT_Q4 ||
+        embed_type < WT_BF16 || embed_type > WT_Q4 ||
+        (version >= 3 && types[2] != 0 && types[2] != 1))
+        die("invalid model weight format");
     m->seq_len = seq_len;
-    map_weights(m, (const char *)(version >= 2 ? types + 2 : types), embed_type);
+    bool untied = version >= 3 && types[2];
+    map_weights(m, (const char *)(types + (version >= 3 ? 3 : version >= 2 ? 2 : 0)),
+                embed_type, untied);
 
     m->be = be;
     if (be->init(m->file, m->file_size) != 0) die("backend %s failed to initialize", be->name);
@@ -231,6 +253,8 @@ float *model_forward(Model *m, int token, int pos, bool want_logits) {
     Backend *be = m->be;
     int D = c->dim, n_full = 0, n_lin = 0;
 
+    if (token < 0 || token >= c->vocab_size || pos < 0 || pos >= m->seq_len)
+        die("token or context position out of range");
     be->embed(s->x, m->embed, token);
     for (int l = 0; l < c->n_layers; l++) {
         const Layer *L = &m->layers[l];
@@ -246,7 +270,7 @@ float *model_forward(Model *m, int token, int pos, bool want_logits) {
     if (!want_logits) return NULL;
 
     be->rmsnorm(s->xb, s->x, m->final_norm, D, c->eps);
-    be->matvec(s->logits, m->embed, s->xb);
+    be->matvec(s->logits, m->head, s->xb);
     be->sync();
     return s->logits;
 }

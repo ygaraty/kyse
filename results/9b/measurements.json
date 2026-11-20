@@ -1,0 +1,170 @@
+{
+  "parameters": {
+    "models": [
+      "models/9b",
+      "en-9b-q8",
+      "en-9b-q4"
+    ],
+    "output": "/Users/felipecruz/Projects/personal/kyse/results/9b",
+    "backend": "metal",
+    "chunks": 2,
+    "chunk_bytes": 1024,
+    "arc_items": 10,
+    "hellaswag_items": 7,
+    "repeats": 3,
+    "reuse_logs": true,
+    "timeout": 900
+  },
+  "results": [
+    {
+      "name": "9b",
+      "model": "/Users/felipecruz/Projects/personal/kyse/models/9b/model.bin",
+      "bytes": 17909729536,
+      "vocab_size": 248320,
+      "backend": "metal",
+      "generation": [
+        {
+          "tokens": 64,
+          "seconds": 9.78,
+          "tokens_per_second": 6.5,
+          "wall_seconds": null
+        },
+        {
+          "tokens": 64,
+          "seconds": 9.4,
+          "tokens_per_second": 6.8,
+          "wall_seconds": null
+        },
+        {
+          "tokens": 64,
+          "seconds": 9.28,
+          "tokens_per_second": 6.9,
+          "wall_seconds": null
+        }
+      ],
+      "generation_median_tokens_per_second": 6.8,
+      "wiki": {
+        "bits_per_byte": 0.826,
+        "bits_per_token": 3.398,
+        "top1_percent": 53.1,
+        "tokens": 832,
+        "bytes": 3423,
+        "ms_per_token": 181.1
+      },
+      "arc_easy": {
+        "items": 10,
+        "acc_percent": 70.0,
+        "acc_norm_percent": 40.0,
+        "partial_run": false,
+        "output": "/Users/felipecruz/Projects/personal/kyse/models/9b/model.bin on /Users/felipecruz/Projects/personal/kyse/data/arc_easy.txt: acc 70.0% (\u00b114.5) | acc_norm 40.0% (\u00b115.5) | 10 items | 213.5s [metal]"
+      },
+      "hellaswag": {
+        "items": 7,
+        "acc_percent": 71.4,
+        "acc_norm_percent": 71.4,
+        "partial_run": true,
+        "output": "item 7: acc 71.4% acc_norm 71.4%"
+      }
+    },
+    {
+      "name": "en-9b-q8",
+      "model": "/Users/felipecruz/Projects/personal/kyse/en-9b-q8/model.bin",
+      "bytes": 7810828544,
+      "vocab_size": 52352,
+      "backend": "metal",
+      "generation": [
+        {
+          "tokens": 64,
+          "seconds": 4.04,
+          "tokens_per_second": 15.8,
+          "wall_seconds": 8.90832262497861
+        },
+        {
+          "tokens": 64,
+          "seconds": 4.06,
+          "tokens_per_second": 15.8,
+          "wall_seconds": 7.949996083043516
+        },
+        {
+          "tokens": 64,
+          "seconds": 4.08,
+          "tokens_per_second": 15.7,
+          "wall_seconds": 7.6770359160145745
+        }
+      ],
+      "generation_median_tokens_per_second": 15.8,
+      "wiki": {
+        "bits_per_byte": 0.8297,
+        "bits_per_token": 3.405,
+        "top1_percent": 53.4,
+        "tokens": 834,
+        "bytes": 3423,
+        "ms_per_token": 68.6
+      },
+      "arc_easy": {
+        "items": 10,
+        "acc_percent": 70.0,
+        "acc_norm_percent": 40.0,
+        "partial_run": false,
+        "output": "/Users/felipecruz/Projects/personal/kyse/en-9b-q8/model.bin on /Users/felipecruz/Projects/personal/kyse/data/arc_easy.txt: acc 70.0% (\u00b114.5) | acc_norm 40.0% (\u00b115.5) | 10 items | 29.9s [metal]"
+      },
+      "hellaswag": {
+        "items": 7,
+        "acc_percent": 71.4,
+        "acc_norm_percent": 71.4,
+        "partial_run": false,
+        "output": "/Users/felipecruz/Projects/personal/kyse/en-9b-q8/model.bin on /Users/felipecruz/Projects/personal/kyse/data/hellaswag.txt: acc 71.4% (\u00b117.1) | acc_norm 71.4% (\u00b117.1) | 7 items | 89.2s [metal]"
+      }
+    },
+    {
+      "name": "en-9b-q4",
+      "model": "/Users/felipecruz/Projects/personal/kyse/en-9b-q4/model.bin",
+      "bytes": 4351576320,
+      "vocab_size": 52352,
+      "backend": "metal",
+      "generation": [
+        {
+          "tokens": 64,
+          "seconds": 2.36,
+          "tokens_per_second": 27.1,
+          "wall_seconds": 4.331202249974012
+        },
+        {
+          "tokens": 64,
+          "seconds": 2.45,
+          "tokens_per_second": 26.2,
+          "wall_seconds": 4.13216800004011
+        },
+        {
+          "tokens": 64,
+          "seconds": 2.53,
+          "tokens_per_second": 25.3,
+          "wall_seconds": 4.517127041995991
+        }
+      ],
+      "generation_median_tokens_per_second": 26.2,
+      "wiki": {
+        "bits_per_byte": 0.8312,
+        "bits_per_token": 3.412,
+        "top1_percent": 52.6,
+        "tokens": 834,
+        "bytes": 3423,
+        "ms_per_token": 41.3
+      },
+      "arc_easy": {
+        "items": 10,
+        "acc_percent": 70.0,
+        "acc_norm_percent": 50.0,
+        "partial_run": false,
+        "output": "/Users/felipecruz/Projects/personal/kyse/en-9b-q4/model.bin on /Users/felipecruz/Projects/personal/kyse/data/arc_easy.txt: acc 70.0% (\u00b114.5) | acc_norm 50.0% (\u00b115.8) | 10 items | 17.0s [metal]"
+      },
+      "hellaswag": {
+        "items": 7,
+        "acc_percent": 42.9,
+        "acc_norm_percent": 85.7,
+        "partial_run": false,
+        "output": "/Users/felipecruz/Projects/personal/kyse/en-9b-q4/model.bin on /Users/felipecruz/Projects/personal/kyse/data/hellaswag.txt: acc 42.9% (\u00b118.7) | acc_norm 85.7% (\u00b113.2) | 7 items | 50.7s [metal]"
+      }
+    }
+  ]
+}

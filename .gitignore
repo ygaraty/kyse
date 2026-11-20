@@ -7,3 +7,7 @@ __pycache__/
 *.bin
 en-*/
 data/
+
+# downloaded checkpoints and local orchestration logs (raw benchmark logs stay tracked)
+/models/
+/results/*.log

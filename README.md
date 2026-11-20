@@ -1,16 +1,19 @@
-# qwen35
+# Kyse
 
-**Stupid simple C inference for Qwen3.5-0.8B**, the hybrid linear-attention model
-(text only). About 2,500 lines of C, Metal and Python, with no dependencies
-beyond the system frameworks.
+**Simple C inference for Qwen3.5-0.8B and Qwen3.5-9B**, the hybrid linear-attention models
+(text only). A small C, Metal and Python implementation, with no runtime
+dependencies beyond the system frameworks.
 
 - **Three backends** behind one small interface: plain C (the readable reference),
   Apple Accelerate, and Metal. On Metal every op is a GPU kernel and the CPU waits
   once per token.
-- **Shrink it for English.** Drop the vocabulary rows English never uses and
-  quantize to int8: **2.6× smaller, 2.3× faster, same benchmark scores.**
+- **Shrink it for English.** Prune rarely used vocabulary rows and quantize the
+  matrices. On 9B, English Q8 is **56% smaller and 2.3× faster** in the M5 smoke
+  tests below.
 - **Measure it.** `bench` reports bits per byte, ARC-Easy and HellaSwag, so every
   change can be checked.
+
+Qwen3.5-0.8B on Apple M1 (the 9B measurements use an M5):
 
 ```
                      size      speed (M1)     bits/byte   ARC-Easy   HellaSwag
@@ -33,11 +36,106 @@ make
 
 `./qwen` with no arguments lists every option (`-v` prints token ids and speed).
 
+## Qwen3.5-9B (text only)
+
+The same C executable handles 9B from its exported configuration. The official
+[9B config](https://huggingface.co/Qwen/Qwen3.5-9B/blob/main/config.json)
+has 32 layers, width 4096, 16 query / 4 KV heads, and 16 key / 32 value
+DeltaNet heads. Unlike 0.8B, its output head is separate from its embedding.
+The exporter reads all shards named in `model.safetensors.index.json` and streams
+BF16 matrices without loading the whole checkpoint into Python memory.
+
+```sh
+hf download Qwen/Qwen3.5-9B --revision c202236235762e1c871ad0ccb60c8ee5ba337b9a --local-dir models/qwen3.5-9b
+python3 export.py models/qwen3.5-9b models/9b
+make
+./qwen models/9b/model.bin -b metal             # interactive chat on macOS
+./qwen models/9b/model.bin -b cpu -t 0 -i "Why is the sky blue?"
+```
+
+Apply the same English vocabulary pruning and quantization workflow:
+
+```sh
+pip install numpy pyarrow                    # shrink.py and data.py
+python3 data.py data
+./bench count models/9b/tokenizer.bin data/english.txt > data/counts-9b.txt
+python3 shrink.py models/9b/model.bin models/9b/tokenizer.bin data/counts-9b.txt en-9b-q8 --quant q8
+python3 shrink.py models/9b/model.bin models/9b/tokenizer.bin data/counts-9b.txt en-9b-q4 --quant q4
+./qwen en-9b-q8/model.bin -b metal              # recommended compact chat model
+./qwen en-9b-q4/model.bin -b metal              # smaller, more aggressive option
+```
+
+Chat remembers previous turns. Type `/reset` to clear the conversation and
+press Ctrl+D to exit. Use `-y "Your system prompt"` to set the assistant
+instructions, or `-i "Your question"` for a one-shot reply.
+
+Both embedding and output-head rows are pruned with exactly the same token map.
+`--embed-quant` controls both tables. The shrinker memory-maps its source;
+conversion and quantization still need working memory for individual matrices.
+Allow roughly 18 GB for the exported BF16 text weights plus runtime state;
+pruning and quantization reduce that. The FP32 KV cache costs 64 KiB per context
+token and DeltaNet recurrent state about 48 MiB. Accelerate expands BF16 weights
+to FP32 and therefore needs substantially more memory. Metal uses page-aligned
+views of the weight file to avoid a single checkpoint-sized GPU buffer; each
+individual matrix must fit the device's buffer limit.
+
+New exports use format v3, adding an untied-head flag and, when needed, an
+output matrix after the final norm. The C loader continues to accept v1/v2
+models. Earlier executables cannot read v3 exports.
+
+`make test` exercises synthetic sharded tied/untied checkpoints through export,
+vocabulary pruning, BF16/Q8/Q4, C CPU inference, reset, snapshot/restore, and v2
+loading (Python + numpy + a C23 compiler). On macOS, run
+`KYSE_TEST_METAL=1 make test` to compare Metal with the CPU reference as well.
+Vision and MTP remain excluded.
+
+### 9B vocabulary-pruning experiments
+
+Calibration used 44.9 MB of English from WikiText-2 train, Dolly-15k and
+TinyStories validation. Keeping tokens seen at least twice, all single bytes,
+special tokens, chat-template words and intermediate BPE tokens reduced the
+vocabulary from **248,320 to 52,352**. On 9B, applying this map to both the
+embedding and separate output head removes about **1.61 billion weights**.
+The held-out WikiText test file needs 298,584 tokens instead of 297,053
+(**+0.52%**); it was not used to select the vocabulary.
+
+Apple M5, 24 GB, Metal. File sizes are decimal GB; generation is the median of
+three greedy 64-token trials. Q4 retains Q8 embedding and output tables.
+
+| 9B variant | Size | Generation | Wiki bits/byte ↓ | ARC acc / norm | HellaSwag acc / norm |
+|---|---:|---:|---:|---:|---:|
+| Original BF16 | 17.91 GB | 6.8 tok/s | 0.8260 | 70.0% / 40.0% | 71.4% / 71.4% |
+| English Q8 | 7.81 GB | 15.8 tok/s | 0.8297 | 70.0% / 40.0% | 71.4% / 71.4% |
+| English Q4, Q8 tables | 4.35 GB | 26.2 tok/s | 0.8312 | 70.0% / 50.0% | 42.9% / 85.7% |
+
+**Q8 is the conservative default:** 56.4% smaller, 2.32× faster, and a 0.45%
+increase in bits per byte on this sample. Q4 is 75.7% smaller and 3.85× faster,
+but changed answer rankings more. Its higher normalized HellaSwag score and
+lower raw score come from different length preferences, and seven items are
+too few to establish a general quality change.
+
+These are smoke tests: 3,423 bytes of held-out WikiText, 10 ARC-Easy questions,
+and seven HellaSwag items. The original HellaSwag run was stopped after seven
+complete items; compact models used that same prefix. These 9B experiments
+combine vocabulary pruning and quantization; no pruned BF16 control was run,
+so the individual effects are not isolated. Multilingual quality was not tested.
+The larger 0.8B experiments below include a pruned BF16 control.
+
+See [the complete 9B report](BENCHMARKS_9B.md) for methods and limitations,
+[measurements and raw logs](results/9b/measurements.json), and
+[calibration metadata and dataset hashes](results/calibration.json).
+Reproduce the 9B checks with:
+
+```sh
+python3 scripts/benchmark.py models/9b en-9b-q8 en-9b-q4 --hellaswag-items 7
+```
+
 ## Make it smaller: English only + int8
 
-Most of the 248,320-token vocabulary is other scripts (CJK alone is 22%). The
-embedding table is also the LM head, so every unused row costs memory *and* time
-on every token: the LM head is a third of the original's per-token work.
+Most of the 248,320-token vocabulary is other scripts (CJK alone is 22%).
+Each unused row costs embedding memory and LM-head work on every token.
+The 0.8B model ties these two tables; 9B has separate tables that are pruned
+together. The measurements in this section describe 0.8B.
 
 ```
 pip install pyarrow                                    # only for data.py
@@ -58,7 +156,7 @@ What `shrink.py` does:
     tokenizes *exactly* as before (verified: 2,504,609 tokens on WikiText train,
     same as the original).
 
-  This drops 203M parameters. On unseen English the new vocabulary needs only
+  On 0.8B this drops 203M parameters. On unseen English the new vocabulary needs only
   0.5% more tokens.
 - **Quantization.** Every matrix becomes int8 (`q8`) or int4 (`q4`) with one f16
   scale per 32 weights. For int4, each group's scale is picked from a few
@@ -69,7 +167,7 @@ What `shrink.py` does:
   back to the reference op for them. Token ids change, so a shrunk `model.bin`
   comes with its own `tokenizer.bin`.
 
-## Benchmarks
+## Benchmarks: Qwen3.5-0.8B
 
 Apple M1 (16 GB), Metal backend. To reproduce, run `data.py` (above), then:
 
@@ -110,7 +208,7 @@ lm-evaluation-harness does. `acc` uses the total log-likelihood; `acc_norm`
 divides it by the choice's length in bytes. The context runs once and each
 choice branches from a snapshot of the recurrent state (`model_snapshot`).
 
-## The model in one screen
+## Qwen3.5-0.8B in one screen
 
 ```
 token ─► embed (248,320 × 1024, tied with the LM head)
@@ -185,12 +283,13 @@ remove CPU round trips. Add an `extern Backend backend_xxx;` and list it in
 - Chat keeps the whole conversation in the context (KV cache + DeltaNet state).
   When it fills up, use `/reset` or start with a larger `-c`.
 - The vision tower and the MTP head are ignored.
-- Developed and measured on macOS (Apple M1). The CPU backend is plain C23 and
+- Developed and measured on macOS (Apple M1 and M5). The CPU backend is plain C23 and
   should build elsewhere, but only macOS has been tested.
 
 ## License
 
 The code is MIT (see `LICENSE`). The Qwen3.5 weights are Apache-2.0, from
-[Qwen/Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B). The datasets
+[Qwen/Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B) and
+[Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B). The datasets
 `data.py` downloads keep their own licenses: WikiText (CC BY-SA), Dolly-15k
 (CC BY-SA 3.0), TinyStories (CDLA-Sharing), ARC (CC BY-SA 4.0) and HellaSwag (MIT).

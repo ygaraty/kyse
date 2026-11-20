@@ -23,7 +23,10 @@ HF ?= ../models/qwen3.5-0.8b
 export:
 	python3 export.py $(HF) .
 
+test:
+	python3 tests/test_model.py
+
 clean:
 	rm -f qwen bench
 
-.PHONY: all export clean
+.PHONY: all export test clean

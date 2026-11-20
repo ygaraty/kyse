@@ -1,9 +1,9 @@
 // Qwen3.5 text model: weights, state and the forward pass.
 //
-// Architecture (Qwen3.5-0.8B): 24 decoder layers in a 3:1 pattern of
+// Architecture: configurable decoder layers in a 3:1 pattern of
 //   - gated deltanet: linear attention with a recurrent [dk, dv] state per head
 //   - gated full attention: GQA, q/k RMSNorm, partial RoPE, sigmoid output gate
-// each followed by a SwiGLU MLP. Embeddings are tied with the LM head.
+// each followed by a SwiGLU MLP. The LM head may be tied or separate.
 #ifndef MODEL_H
 #define MODEL_H
 
@@ -50,13 +50,13 @@ typedef struct {
     const int32_t *full_attn;    // per layer: 1 = full attention, 0 = gated deltanet
     int seq_len;                 // context length the state is allocated for
     WeightType mat_type;         // format of the layer matrices
-    Mat embed;                   // [vocab_size, dim], also the LM head
+    Mat embed, head;             // [vocab_size, dim]; head aliases embed when tied
     const float *final_norm;
     Layer *layers;
     State s;
     Backend *be;
     void *file;
-    size_t file_size;
+    size_t file_size, data_size; // page-rounded mapping and actual file length
 } Model;
 
 void model_load(Model *m, const char *path, Backend *be, int seq_len);
