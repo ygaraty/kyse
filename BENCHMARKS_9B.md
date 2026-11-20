@@ -4,6 +4,9 @@ Measured on 2026-11-20, Apple M5 (10-core GPU), 24 GB unified memory, Metal back
 
 Source: [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B), revision `c202236235762e1c871ad0ccb60c8ee5ba337b9a`.
 
+These are historical FP32 KV-cache measurements. The merged runtime now uses
+FP16 KV; these scores and timings were not rerun or relabeled as FP16 results.
+
 ## Results
 
 Sizes are decimal GB. Generation is the median of three greedy 64-token CLI trials using the same 27-token chat prompt and a 512-token context. The CLI reports decode timing separately from prompt processing; these are its reported rates, rounded to 0.1 tok/s. Runs were sequential.

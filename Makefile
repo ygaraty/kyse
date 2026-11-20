@@ -13,13 +13,31 @@ endif
 SRC := $(addprefix src/,$(SRC))
 HDR := $(addprefix src/,$(HDR))
 
-all: qwen bench
+ifeq ($(shell uname),Darwin)
+  LIBRARY = build/libkyse.dylib
+  SHARED_FLAGS = -dynamiclib
+  LIBRARY_SRC = src/library_pool.m
+else
+  LIBRARY = build/libkyse.so
+  SHARED_FLAGS = -shared
+endif
+
+all: qwen bench qwen-worker library
 
 qwen: src/main.c $(SRC) $(HDR)
 	$(CC) $(CFLAGS) -o $@ src/main.c $(SRC) $(LDFLAGS) -lm
 
 bench: src/bench.c $(SRC) $(HDR)
 	$(CC) $(CFLAGS) -o $@ src/bench.c $(SRC) $(LDFLAGS) -lm
+
+qwen-worker: src/worker.c $(SRC) $(HDR)
+	$(CC) $(CFLAGS) -o $@ src/worker.c $(SRC) $(LDFLAGS) -lm
+
+library: $(LIBRARY)
+
+$(LIBRARY): src/kyse.c src/kyse.h $(SRC) $(HDR) $(LIBRARY_SRC)
+	mkdir -p build
+	$(CC) $(CFLAGS) -DKYSE_LIBRARY -fPIC -fvisibility=hidden $(SHARED_FLAGS) -o $@ src/kyse.c $(SRC) $(LIBRARY_SRC) $(LDFLAGS) -pthread -lm
 
 # make export HF=path/to/hf/checkpoint
 HF ?= ../models/qwen3.5-0.8b
@@ -29,7 +47,8 @@ export:
 test:
 	uv run python -m unittest discover -s tests
 
-clean:
-	rm -f qwen bench
 
-.PHONY: all export test clean
+clean:
+	rm -f qwen bench qwen-worker $(LIBRARY)
+
+.PHONY: all library export test clean

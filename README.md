@@ -60,7 +60,8 @@ about 1.60 GB for the original, 0.67 GB for int8 and 0.49 GB for int4 mixed.
 
 This sample is small: 3.4 KB of WikiText, plus 10 ARC and 7 HellaSwag items
 (see [the 9B report](BENCHMARKS_9B.md)). AWQ and mixed precision haven't been
-run on 9B yet.
+run on 9B yet. These 9B results were recorded with the older FP32 KV cache;
+they are retained as historical measurements, not remeasured FP16 results.
 
 ## The compression methods
 
@@ -227,7 +228,7 @@ All the int4 variants side by side, with every metric:
 that run the model, so build that first:
 
 ```sh
-make                                    # builds ./qwen and ./bench
+make                                    # ./qwen, ./bench, the worker and the shared library
 uv sync --extra data                    # installs kyse (numpy; pyarrow for `kyse data`)
 ```
 
@@ -355,7 +356,23 @@ Ctrl-D to quit. The tokenizer is read from next to the model file.
 | `-c <int>` | 4096 | context length |
 | `-z <path>` | next to the model | tokenizer |
 | `-b <name>` | `metal` | backend: `metal`, `accelerate`, `cpu` |
-| `-v` | | print token ids and speed |
+| `-v` | | print token ids and reply statistics |
+| `-q` | | hide reply statistics |
+
+`./qwen` with no arguments lists every option. Interactive chat prints a stats
+line to stderr after each reply: prompt/output token counts, prompt processing
+speed, TTFT, decode tok/s and ms/token, total time, context usage and stop reason.
+Use `-q` to hide stats, or `-v` to add token IDs and enable stats for one-shot
+replies as well.
+
+TTFT runs from the start of processing the submitted turn to the first output
+token being flushed, including tokenization, prompt evaluation and sampling;
+it excludes model loading and time spent typing. Prompt speed measures prompt
+evaluation through the first logits. Decode speed uses the intervals between
+output tokens, excluding the first-token wait and terminal EOS evaluation.
+Decode speed is `n/a` for zero- or one-token replies; TTFT is `n/a` when the
+model immediately returns EOS. Context usage counts evaluated tokens; the last
+emitted token is evaluated on the next step or closed by the next chat turn.
 
 Backends:
 
@@ -364,6 +381,34 @@ Backends:
   so it needs much more memory, and it uses the reference code for int8/int4.
 - **cpu** is the plain C reference: slow, but the readable specification of
   every op.
+
+## Local API for data jobs: Piara
+
+The Python HTTP server and CFFI binding now live in the sibling `../piara/`
+project. Kyse provides the shared C inference library and optional isolated
+worker. Piara exposes `/v1/completions`, `/v1/chat/completions`, SSE streaming,
+model discovery and token usage, with native inference on a dedicated thread.
+
+With Piara checked out alongside Kyse, run from the Kyse directory:
+
+```sh
+make library
+uv sync --project ../piara
+uv run --project ../piara piara-server --model en-9b-q8/model.bin --backend metal
+```
+
+Use `http://127.0.0.1:8000/v1` as an OpenAI client's `base_url`, with model
+`kyse` and any placeholder API key. Piara's README documents async jobs,
+streaming, supported parameters and limits. It locates the sibling Kyse checkout
+by default; set `KYSE_ROOT` or use `--library` for another installation.
+
+A [prior near-32k context smoke test](results/context32k/README.md) passed on
+Q8/Metal: 32,736 prompt tokens and successful retrieval from the beginning.
+That run used the older FP32 KV cache (2 GiB) and took 54 min 33 s to reach
+the first token. The merged runtime uses FP16 KV (1 GiB at 32k); those historical
+timings are not a new measurement of FP16. Use `--context 32768 --timeout 7200`
+for comparable long API requests. The benchmark itself is part of Piara
+(`piara-benchmark-context`).
 
 ## Measuring: `bench`
 
@@ -502,6 +547,10 @@ Interactive explainers, built with real numbers from this code:
 
 ## Code
 
+C/Metal sources and headers live in `src/`, the `kyse` Python package in
+`python/kyse/`, benchmark scripts in `scripts/`,
+and the companion HTTP API and CFFI binding in `../piara/`.
+
 | file | what |
 |---|---|
 | `python/kyse/cli.py` | the `kyse` command: presets, plans, caching, error messages |
@@ -513,6 +562,9 @@ Interactive explainers, built with real numbers from this code:
 | `python/kyse/data.py` | downloads the English corpus and the benchmark sets (pyarrow) |
 | `scripts/benchmark.py` | runs the 9B smoke tests and saves the measurements |
 | `src/main.c` | `qwen`: command line, chat template, prompt + decode loop |
+| `src/kyse.h` + `src/kyse.c` | opaque shared-library API with recoverable errors and bounded prefill |
+| `src/library_pool.m` | Metal autorelease pools for shared-library calls |
+| `src/worker.c` | optional isolated subprocess engine |
 | `src/bench.c` | `bench`: bpb, mc, kl, calib, count |
 | `src/model.c` | loads `model.bin`, lays out the state, wires the forward pass |
 | `src/ops_ref.c` | reference C implementation of every op (the readable spec of the math) |
@@ -530,7 +582,8 @@ low-rank corrections. It then checks C inference, reset, snapshot/restore, and
 loading of older files. It also checks that AWQ's rescaling leaves a layer's
 output unchanged, and drives the `kyse` command: presets, pattern checks,
 dry runs and error messages. `KYSE_TEST_METAL=1 make test` also compares
-Metal with the CPU reference.
+Metal with the CPU reference. The CFFI and worker HTTP engines, streaming,
+cancellation, native ownership and error recovery are tested in Piara.
 
 **File format:** `model.bin` is a small header followed by 64-byte-aligned
 tensors, memory-mapped at load time. Each version adds to the header:

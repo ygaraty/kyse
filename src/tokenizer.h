@@ -1,8 +1,10 @@
 // Byte-level BPE tokenizer (GPT-2 / Qwen style), loaded from tokenizer.bin.
 #ifndef TOKENIZER_H
 #define TOKENIZER_H
+#include <stdio.h>
 
 typedef struct {
+    FILE *file;    // owned during loading, so a library error can close it
     int vocab_size;
     char **tokens;  // raw bytes of each token (may contain NULs, use lens)
     int *lens;

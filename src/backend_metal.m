@@ -264,10 +264,11 @@ static void metal_deltanet(const DeltaArgs *a) {
 
 static void metal_sync(void) {
     flush();
-    [last_cmd waitUntilCompleted];
-    if (last_cmd && last_cmd.status == MTLCommandBufferStatusError)
-        die("metal: command failed: %s", last_cmd.error.localizedDescription.UTF8String);
+    id<MTLCommandBuffer> completed = last_cmd;
+    [completed waitUntilCompleted];
     last_cmd = nil;
+    if (completed && completed.status == MTLCommandBufferStatusError)
+        die("metal: command failed: %s", completed.error.localizedDescription.UTF8String);
 }
 
 static void metal_shutdown(void) {

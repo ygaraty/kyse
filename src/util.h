@@ -9,6 +9,10 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef KYSE_LIBRARY
+[[noreturn]] void kyse_fail(const char *fmt, ...);
+#define die kyse_fail
+#else
 [[noreturn]] static inline void die(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -17,6 +21,8 @@
     fputc('\n', stderr);
     exit(1);
 }
+
+#endif
 
 // bf16 is the top half of an f32
 static inline float bf16_to_f32(uint16_t h) {

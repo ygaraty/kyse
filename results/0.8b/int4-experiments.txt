@@ -34,12 +34,12 @@ en-q4-mix-down/model.bin on data/arc_easy.txt: acc 59.2% (±3.1) | acc_norm 55.2
 en-q4-mix-down/model.bin on data/hellaswag.txt: acc 35.0% (±5.3) | acc_norm 41.2% (±5.5) | 80 items | 356.5s [metal]
 
 ## generation tok/s, 7 interleaved runs each (sorted): ./qwen <dir>/model.bin -c 512 -t 0 -n 64 -v -i 'Explain how a rainbow forms, step by step, in plain English.'
-en-q8 43.1 48.3 49.9 52.3 60.0 61.6 62.8 
-en-q4 56.7 58.8 64.2 65.4 65.5 78.2 79.3 
-en-q4-awq 43.3 66.6 67.4 68.8 69.9 70.7 76.2 
-en-q4-lr 39.8 53.8 58.1 62.0 73.3 73.6 75.0 
-en-q4-mix 37.7 56.2 60.6 67.1 69.8 75.7 76.3 
-en-q4-mix-down 33.6 40.0 46.8 55.3 56.1 63.1 71.8 
+en-q8 43.1 48.3 49.9 52.3 60.0 61.6 62.8
+en-q4 56.7 58.8 64.2 65.4 65.5 78.2 79.3
+en-q4-awq 43.3 66.6 67.4 68.8 69.9 70.7 76.2
+en-q4-lr 39.8 53.8 58.1 62.0 73.3 73.6 75.0
+en-q4-mix 37.7 56.2 60.6 67.1 69.8 75.7 76.3
+en-q4-mix-down 33.6 40.0 46.8 55.3 56.1 63.1 71.8
 
 ## KL from the English bf16 model (bench kl, top-64 reference, 4 chunks of WikiText-2 test)
 # ./bench kl en-bf16/model.bin data/wiki.test.txt data/kl-ref.bin -k 4 -b metal   (writes the reference)

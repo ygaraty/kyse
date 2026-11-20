@@ -1,0 +1,56 @@
+{
+  "context": 32768,
+  "requested_prompt_tokens": 32736,
+  "model": "/Users/felipecruz/Projects/personal/kyse/en-9b-q8/model.bin",
+  "backend": "metal",
+  "expected_answer": "strawberry",
+  "prompt_sha256": "a0386cf2f84df600a3be6b445b2c81961657fc701e4b078dfeeb4ba5efb9938a",
+  "load_seconds": 0.4986854169983417,
+  "short_prompt_at_32k": {
+    "text": "strawberry",
+    "usage": {
+      "prompt_tokens": 42,
+      "completion_tokens": 3,
+      "total_tokens": 45
+    },
+    "finish_reason": "stop",
+    "ttft_seconds": 6.3975144169526175,
+    "total_seconds": 6.596406749973539,
+    "stream_chunks": 3,
+    "decode_chunks_per_second": 15.236247612736527
+  },
+  "short_control_passed": true,
+  "long_prompt": {
+    "text": "strawberry",
+    "usage": {
+      "prompt_tokens": 32736,
+      "completion_tokens": 3,
+      "total_tokens": 32739
+    },
+    "finish_reason": "stop",
+    "ttft_seconds": 3272.9817655420047,
+    "total_seconds": 3273.4033250830253,
+    "stream_chunks": 3,
+    "decode_chunks_per_second": 7.203442182084126
+  },
+  "recall_passed": true,
+  "actual_prompt_tokens_match": true,
+  "peak_process_rss_bytes": 2285404160,
+  "over_window_rejected": "prompt is empty or exceeds the context window",
+  "after_rejection": {
+    "text": "strawberry",
+    "usage": {
+      "prompt_tokens": 42,
+      "completion_tokens": 3,
+      "total_tokens": 45
+    },
+    "finish_reason": "stop",
+    "ttft_seconds": 2.827108457975555,
+    "total_seconds": 3.0246869159745984,
+    "stream_chunks": 3,
+    "decode_chunks_per_second": 15.07233310636198
+  },
+  "kv_cache_dtype": "float32",
+  "runtime_commit": "2aaaa895869d54e00ba2d8c6c463be2e1f4ad8e4",
+  "historical_before_fp16_kv_merge": true
+}

@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <sys/stat.h>
 #include <string.h>
 #include "tokenizer.h"
 #include "util.h"
@@ -32,26 +33,38 @@ static bool is_special(const Tokenizer *t, int id) {
 void tokenizer_load(Tokenizer *t, const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) die("cannot open %s", path);
+    t->file = f;
     int32_t header[3];
     read_exact(f, header, sizeof(header));
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0 || header[0] <= 0 || header[1] < 0 ||
+        header[1] > header[0] || header[2] < 0 ||
+        (uint64_t)st.st_size < 12 + (uint64_t)header[1] * 4 + (uint64_t)header[0] * 8)
+        die("invalid tokenizer header");
     t->vocab_size = header[0];
     t->n_special = header[1];
     t->special = malloc(t->n_special * sizeof(int));
-    t->tokens = malloc(t->vocab_size * sizeof(char *));
+    t->tokens = calloc(t->vocab_size, sizeof(char *));
     t->lens = malloc(t->vocab_size * sizeof(int));
     t->ranks = malloc(t->vocab_size * sizeof(int));
     t->sorted = malloc(t->vocab_size * sizeof(int));
+    if ((!t->special && t->n_special) || !t->tokens || !t->lens || !t->ranks || !t->sorted) die("out of memory");
     read_exact(f, t->special, t->n_special * sizeof(int));
+    for (int i = 0; i < t->n_special; i++)
+        if (t->special[i] < 0 || t->special[i] >= t->vocab_size) die("invalid special token id");
     for (int i = 0; i < t->vocab_size; i++) {
         int32_t rank_len[2];
         read_exact(f, rank_len, sizeof(rank_len));
+        if (rank_len[1] < 0 || rank_len[1] > header[2]) die("invalid token length");
         t->ranks[i] = rank_len[0];
         t->lens[i] = rank_len[1];
         t->tokens[i] = malloc(t->lens[i] + 1);
+        if (!t->tokens[i]) die("out of memory");
         read_exact(f, t->tokens[i], t->lens[i]);
         t->tokens[i][t->lens[i]] = '\0';
     }
     fclose(f);
+    t->file = NULL;
 
     t->n_sorted = 0;
     for (int i = 0; i < t->vocab_size; i++)
@@ -61,7 +74,8 @@ void tokenizer_load(Tokenizer *t, const char *path) {
 }
 
 void tokenizer_free(Tokenizer *t) {
-    for (int i = 0; i < t->vocab_size; i++) free(t->tokens[i]);
+    if (t->file) fclose(t->file);
+    if (t->tokens) for (int i = 0; i < t->vocab_size; i++) free(t->tokens[i]);
     free(t->tokens);
     free(t->lens);
     free(t->ranks);
